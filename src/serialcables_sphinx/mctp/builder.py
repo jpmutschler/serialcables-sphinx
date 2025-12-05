@@ -1,10 +1,12 @@
 """
 MCTP packet builder for constructing properly framed MCTP messages.
+
+Supports fragmentation for payloads exceeding the 128-byte TX packet limit.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
 
 from serialcables_sphinx.mctp.header import MCTPHeader
 from serialcables_sphinx.mctp.constants import (
@@ -12,6 +14,12 @@ from serialcables_sphinx.mctp.constants import (
     MCTP_SMBUS_COMMAND_CODE,
     DEFAULT_SOURCE_EID,
     DEFAULT_SMBUS_ADDRESS,
+)
+from serialcables_sphinx.mctp.fragmentation import (
+    FragmentationConstants,
+    FragmentationConfig,
+    FragmentedMessage,
+    MCTPFragment,
 )
 
 
@@ -238,3 +246,273 @@ class MCTPBuilder:
     def current_tag(self) -> int:
         """Get current message tag value (next to be used)."""
         return self._msg_tag
+    
+    # -------------------------------------------------------------------------
+    # Fragmentation Support
+    # -------------------------------------------------------------------------
+    
+    def needs_fragmentation(
+        self,
+        payload: bytes,
+        max_payload: int = FragmentationConstants.MAX_TX_PAYLOAD,
+    ) -> bool:
+        """
+        Check if a payload requires fragmentation.
+        
+        Args:
+            payload: The MCTP payload (message type byte + data)
+            max_payload: Maximum payload per packet
+            
+        Returns:
+            True if payload exceeds single packet limit
+        """
+        # Account for message type byte in the payload calculation
+        # The 'payload' passed to build_raw doesn't include msg_type,
+        # but the wire format does
+        total_payload = len(payload) + 1  # +1 for message type byte
+        return total_payload > max_payload
+    
+    def calculate_fragment_count(
+        self,
+        payload: bytes,
+        max_payload: int = FragmentationConstants.MAX_TX_PAYLOAD,
+    ) -> int:
+        """
+        Calculate number of fragments needed for a payload.
+        
+        Args:
+            payload: The payload bytes (not including message type)
+            max_payload: Maximum payload per packet
+            
+        Returns:
+            Number of fragments required (minimum 1)
+        """
+        total_payload = len(payload) + 1  # +1 for message type
+        if total_payload <= max_payload:
+            return 1
+        
+        # First fragment includes message type byte
+        first_data = max_payload - 1
+        remaining = len(payload) - first_data
+        
+        # Subsequent fragments are pure data
+        additional = (remaining + max_payload - 1) // max_payload
+        return 1 + additional
+    
+    def build_fragmented(
+        self,
+        dest_eid: int,
+        msg_type: int,
+        payload: bytes,
+        src_eid: Optional[int] = None,
+        msg_tag: Optional[int] = None,
+        tag_owner: bool = True,
+        smbus_addr: Optional[int] = None,
+        include_pec: Optional[bool] = None,
+        max_payload: int = FragmentationConstants.MAX_TX_PAYLOAD,
+    ) -> FragmentedMessage:
+        """
+        Build a potentially fragmented MCTP message.
+        
+        If the payload fits in a single packet, returns a FragmentedMessage
+        with one fragment. Otherwise, splits across multiple packets.
+        
+        Args:
+            dest_eid: Destination Endpoint ID
+            msg_type: MCTP message type
+            payload: Message payload (after message type byte)
+            src_eid: Source EID (uses instance default if None)
+            msg_tag: Message tag (auto-assigned if None)
+            tag_owner: Tag owner flag
+            smbus_addr: Target SMBus address
+            include_pec: Include PEC byte
+            max_payload: Maximum payload per packet
+            
+        Returns:
+            FragmentedMessage with all fragments ready for transmission
+            
+        Example:
+            # Large VPD read that needs fragmentation
+            result = builder.build_fragmented(
+                dest_eid=1,
+                msg_type=MCTPMessageType.NVME_MI,
+                payload=large_vpd_data,
+            )
+            
+            for fragment in result.fragments:
+                transport.send(fragment.data)
+                time.sleep(0.005)  # Inter-fragment delay
+        """
+        # Use defaults
+        src_eid = src_eid if src_eid is not None else self.src_eid
+        smbus_addr = smbus_addr if smbus_addr is not None else self.smbus_addr
+        include_pec = include_pec if include_pec is not None else self.auto_pec
+        
+        # Assign message tag
+        if msg_tag is None:
+            msg_tag = self._msg_tag
+            self._msg_tag = (self._msg_tag + 1) & 0x07
+        
+        # Full payload on wire = msg_type byte + payload
+        wire_payload = bytes([msg_type]) + payload
+        
+        # Check if fragmentation needed
+        if len(wire_payload) <= max_payload:
+            # Single packet
+            packet = self._build_fragment_packet(
+                dest_eid=dest_eid,
+                src_eid=src_eid,
+                wire_payload=wire_payload,
+                som=True,
+                eom=True,
+                pkt_seq=0,
+                msg_tag=msg_tag,
+                tag_owner=tag_owner,
+                smbus_addr=smbus_addr,
+                include_pec=include_pec,
+            )
+            
+            fragment = MCTPFragment(
+                data=packet,
+                sequence=0,
+                is_first=True,
+                is_last=True,
+                payload_offset=0,
+                payload_length=len(payload),
+            )
+            
+            return FragmentedMessage(
+                fragments=[fragment],
+                total_payload_length=len(payload),
+                message_tag=msg_tag,
+            )
+        
+        # Multiple fragments needed
+        fragments: List[MCTPFragment] = []
+        offset = 0
+        pkt_seq = 0
+        
+        while offset < len(wire_payload):
+            chunk = wire_payload[offset:offset + max_payload]
+            is_first = (offset == 0)
+            is_last = (offset + len(chunk) >= len(wire_payload))
+            
+            packet = self._build_fragment_packet(
+                dest_eid=dest_eid,
+                src_eid=src_eid,
+                wire_payload=chunk,
+                som=is_first,
+                eom=is_last,
+                pkt_seq=pkt_seq,
+                msg_tag=msg_tag,
+                tag_owner=tag_owner,
+                smbus_addr=smbus_addr,
+                include_pec=include_pec,
+            )
+            
+            # Calculate payload offset (accounting for msg_type in first fragment)
+            if is_first:
+                payload_offset = 0
+                payload_len = len(chunk) - 1  # Minus msg_type byte
+            else:
+                payload_offset = offset - 1  # -1 for msg_type in first fragment
+                payload_len = len(chunk)
+            
+            fragment = MCTPFragment(
+                data=packet,
+                sequence=pkt_seq,
+                is_first=is_first,
+                is_last=is_last,
+                payload_offset=payload_offset,
+                payload_length=payload_len,
+            )
+            fragments.append(fragment)
+            
+            offset += len(chunk)
+            pkt_seq = (pkt_seq + 1) & 0x03  # Wrap at 4
+        
+        return FragmentedMessage(
+            fragments=fragments,
+            total_payload_length=len(payload),
+            message_tag=msg_tag,
+        )
+    
+    def _build_fragment_packet(
+        self,
+        dest_eid: int,
+        src_eid: int,
+        wire_payload: bytes,
+        som: bool,
+        eom: bool,
+        pkt_seq: int,
+        msg_tag: int,
+        tag_owner: bool,
+        smbus_addr: int,
+        include_pec: bool,
+    ) -> bytes:
+        """
+        Build a single fragment packet.
+        
+        The wire_payload already includes the message type byte for the
+        first fragment. Subsequent fragments are continuation data only.
+        """
+        # Build MCTP header
+        header = MCTPHeader(
+            dest_eid=dest_eid,
+            src_eid=src_eid,
+            som=som,
+            eom=eom,
+            pkt_seq=pkt_seq,
+            tag_owner=tag_owner,
+            msg_tag=msg_tag,
+        )
+        
+        # MCTP message = header + wire_payload (which includes msg_type for first)
+        mctp_message = header.pack() + wire_payload
+        
+        # SMBus framing
+        byte_count = len(mctp_message)
+        packet = bytes([
+            smbus_addr,
+            MCTP_SMBUS_COMMAND_CODE,
+            byte_count,
+        ]) + mctp_message
+        
+        # Add PEC if requested
+        if include_pec:
+            packet += bytes([self.calculate_pec(packet)])
+        
+        return packet
+    
+    def build_nvme_mi_fragmented(
+        self,
+        dest_eid: int,
+        payload: bytes,
+        integrity_check: bool = False,
+        max_payload: int = FragmentationConstants.MAX_TX_PAYLOAD,
+        **kwargs,
+    ) -> FragmentedMessage:
+        """
+        Build a potentially fragmented NVMe-MI request.
+        
+        Args:
+            dest_eid: Destination Endpoint ID
+            payload: NVMe-MI request payload (opcode + parameters)
+            integrity_check: Set integrity check flag
+            max_payload: Maximum payload per packet
+            **kwargs: Additional arguments for build_fragmented
+            
+        Returns:
+            FragmentedMessage ready for transmission
+        """
+        msg_type = MCTPMessageType.NVME_MI
+        if integrity_check:
+            msg_type |= 0x80
+        
+        return self.build_fragmented(
+            dest_eid=dest_eid,
+            msg_type=msg_type,
+            payload=payload,
+            max_payload=max_payload,
+            **kwargs,
+        )

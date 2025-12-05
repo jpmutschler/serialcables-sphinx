@@ -1,0 +1,310 @@
+"""
+Tests for mock transport and basic Sphinx functionality.
+
+Run with: pytest tests/test_mock_transport.py -v
+"""
+
+import pytest
+from serialcables_sphinx import Sphinx, NVMeMIOpcode, NVMeMIStatus
+from serialcables_sphinx.transports.mock import MockTransport, MockDeviceState
+
+
+class TestMockTransport:
+    """Tests for MockTransport class."""
+    
+    def test_create_default(self):
+        """Test creating mock with default state."""
+        mock = MockTransport()
+        assert mock.state is not None
+        assert mock.state.temperature_kelvin == 318
+        assert mock.state.ready is True
+    
+    def test_create_custom_state(self):
+        """Test creating mock with custom state."""
+        state = MockDeviceState(temperature_kelvin=350, available_spare=50)
+        mock = MockTransport(state=state)
+        assert mock.state.temperature_kelvin == 350
+        assert mock.state.available_spare == 50
+    
+    def test_packet_recording(self):
+        """Test that packets are recorded."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        sphinx.nvme_mi.health_status_poll(eid=1)
+        
+        assert len(mock.sent_packets) == 1
+        assert mock.get_last_opcode() == NVMeMIOpcode.NVM_SUBSYSTEM_HEALTH_STATUS_POLL
+    
+    def test_reset(self):
+        """Test reset clears tracking."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        sphinx.nvme_mi.health_status_poll(eid=1)
+        assert len(mock.sent_packets) == 1
+        
+        mock.reset()
+        assert len(mock.sent_packets) == 0
+    
+    def test_error_injection(self):
+        """Test fail_next causes error."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        mock.inject_error("Test error")
+        
+        with pytest.raises(RuntimeError, match="Test error"):
+            sphinx.nvme_mi.health_status_poll(eid=1)
+        
+        # Should work again after
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        assert result.success
+
+
+class TestHealthStatusPoll:
+    """Tests for health status poll command."""
+    
+    def test_success_response(self):
+        """Test successful health status poll."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        
+        assert result.success
+        assert result.status_code == NVMeMIStatus.SUCCESS
+        assert result.opcode_value == NVMeMIOpcode.NVM_SUBSYSTEM_HEALTH_STATUS_POLL
+    
+    def test_temperature_decoding(self):
+        """Test temperature is correctly decoded."""
+        mock = MockTransport()
+        mock.state.temperature_kelvin = 318  # 45°C
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        
+        temp_str = result['Composite Temperature']
+        assert "45°C" in temp_str
+        assert "318 K" in temp_str
+    
+    def test_spare_threshold_warning(self):
+        """Test spare below threshold detection."""
+        mock = MockTransport()
+        mock.state.available_spare = 5
+        mock.state.spare_threshold = 10
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        
+        spare_field = result.get_field('Available Spare')
+        assert spare_field is not None
+        assert "Below threshold" in spare_field.description
+    
+    def test_ready_status(self):
+        """Test ready status decoding."""
+        mock = MockTransport()
+        mock.state.ready = True
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        assert result['Ready (RDY)'] is True
+        
+        mock.state.ready = False
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        assert result['Ready (RDY)'] is False
+
+
+class TestReadDataStructure:
+    """Tests for Read NVMe-MI Data Structure command."""
+    
+    def test_subsystem_info(self):
+        """Test reading subsystem information."""
+        mock = MockTransport()
+        mock.state.nvme_mi_major = 1
+        mock.state.nvme_mi_minor = 2
+        mock.state.num_ports = 2
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.get_subsystem_info(eid=1)
+        
+        assert result.success
+        assert result['NVMe-MI Version'] == "1.2"
+        assert result['Number of Ports'] == 2
+    
+    def test_controller_list(self):
+        """Test reading controller list."""
+        mock = MockTransport()
+        mock.state.controller_ids = [0, 1, 2]
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.get_controller_list(eid=1)
+        
+        assert result.success
+        assert result['Number of Controllers'] == 3
+        assert result['Controller IDs'] == [0, 1, 2]
+    
+    def test_port_info(self):
+        """Test reading port information."""
+        mock = MockTransport()
+        mock.state.port_type = 0x02  # SMBus/I2C
+        mock.state.max_mctp_mtu = 64
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.get_port_info(port_id=0, eid=1)
+        
+        assert result.success
+        assert "SMBus" in result['Port Type']
+        assert result['Max MCTP Transmission Unit'] == 64
+
+
+class TestControllerHealthStatus:
+    """Tests for controller health status poll."""
+    
+    def test_valid_controller(self):
+        """Test polling valid controller."""
+        mock = MockTransport()
+        mock.state.controller_ids = [0, 1]
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.controller_health_status(controller_id=0, eid=1)
+        
+        assert result.success
+        assert result['Controller ID'] == 0
+    
+    def test_invalid_controller(self):
+        """Test polling non-existent controller."""
+        mock = MockTransport()
+        mock.state.controller_ids = [0]
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.controller_health_status(controller_id=99, eid=1)
+        
+        assert not result.success
+        assert result.status_code == NVMeMIStatus.INVALID_PARAMETER
+
+
+class TestVPDRead:
+    """Tests for VPD read command."""
+    
+    def test_read_vpd(self):
+        """Test reading VPD data."""
+        mock = MockTransport()
+        mock.state.vpd_data = b"Test VPD Data 12345"
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.vpd_read(offset=0, length=256, eid=1)
+        
+        assert result.success
+        assert "Test VPD Data" in result['VPD Content']
+
+
+class TestOutputFormats:
+    """Tests for response output formats."""
+    
+    def test_to_dict(self):
+        """Test dictionary export."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        data = result.to_dict()
+        
+        assert 'opcode' in data
+        assert 'status' in data
+        assert 'success' in data
+        assert 'fields' in data
+        assert data['success'] is True
+    
+    def test_to_flat_dict(self):
+        """Test flat dictionary export."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        flat = result.to_flat_dict()
+        
+        assert 'success' in flat
+        assert 'Composite Temperature' in flat
+    
+    def test_pretty_print(self):
+        """Test pretty print output."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        output = result.pretty_print()
+        
+        assert "NVMe-MI Response" in output
+        assert "Status:" in output
+        assert "Decoded Fields:" in output
+    
+    def test_summary(self):
+        """Test one-line summary."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        summary = result.summary()
+        
+        assert "✓" in summary  # Success indicator
+        assert "SUCCESS" in summary
+
+
+class TestMCTPBuilder:
+    """Tests for MCTP packet building."""
+    
+    def test_build_health_poll_packet(self):
+        """Test building health poll packet."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        packet = sphinx.mctp.build_nvme_mi_request(
+            dest_eid=1,
+            payload=bytes([0x01, 0x00, 0x00, 0x00]),  # Health poll opcode
+        )
+        
+        # Verify structure
+        assert packet[0] == 0x3A  # Default SMBus address
+        assert packet[1] == 0x0F  # MCTP command code
+        assert packet[7] == 0x04  # NVMe-MI message type
+        assert packet[8] == 0x01  # Health poll opcode
+    
+    def test_pec_calculation(self):
+        """Test PEC is appended."""
+        mock = MockTransport()
+        sphinx = Sphinx(mock)
+        
+        packet = sphinx.mctp.build_nvme_mi_request(
+            dest_eid=1,
+            payload=bytes([0x01, 0x00, 0x00, 0x00]),
+        )
+        
+        # Verify PEC byte is present
+        byte_count = packet[2]
+        expected_end = 3 + byte_count
+        assert len(packet) == expected_end + 1  # +1 for PEC
+
+
+class TestDiscovery:
+    """Tests for subsystem discovery."""
+    
+    def test_discover_subsystem(self):
+        """Test full subsystem discovery."""
+        mock = MockTransport()
+        mock.state.controller_ids = [0, 1]
+        sphinx = Sphinx(mock)
+        
+        discovery = sphinx.nvme_mi.discover_subsystem(eid=1)
+        
+        assert 'subsystem' in discovery
+        assert 'health' in discovery
+        assert 'controllers' in discovery
+        
+        assert discovery['subsystem'] is not None
+        assert discovery['health'] is not None
+        assert len(discovery['controllers']) == 2
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

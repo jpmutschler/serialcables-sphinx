@@ -34,15 +34,22 @@ This automatically installs `serialcables-hydra` as a dependency.
 
 ## Quick Start
 
+### With Real HYDRA Hardware
+
 ```python
-from serialcables_hydra import HYDRADevice
+from serialcables_hydra import JBOFController
 from serialcables_sphinx import Sphinx
+from serialcables_sphinx.transports.hydra import HYDRATransport
 
 # Connect to HYDRA enclosure
-hydra = HYDRADevice("/dev/ttyUSB0")
+jbof = JBOFController()
+jbof.connect("/dev/ttyUSB0")  # or "COM3" on Windows
+
+# Create transport adapter for slot 1
+transport = HYDRATransport(jbof, slot=1)
 
 # Create Sphinx protocol handler
-sphinx = Sphinx(hydra)
+sphinx = Sphinx(transport)
 
 # Poll NVM Subsystem Health Status
 result = sphinx.nvme_mi.health_status_poll(eid=1)
@@ -51,6 +58,25 @@ if result.success:
     print(result.pretty_print())
 else:
     print(f"Error: {result.status}")
+```
+
+### With Mock Transport (Testing)
+
+```python
+from serialcables_sphinx import Sphinx
+from serialcables_sphinx.transports.mock import MockTransport
+
+# Create mock transport (no hardware needed)
+mock = MockTransport()
+
+# Optionally configure simulated device state
+mock.set_temperature(45)  # 45°C
+mock.state.available_spare = 90
+
+# Use identically to real hardware
+sphinx = Sphinx(mock)
+result = sphinx.nvme_mi.health_status_poll(eid=1)
+print(result.pretty_print())
 ```
 
 ## Features
@@ -117,6 +143,47 @@ packet = sphinx.mctp.build_raw(
     eom=True
 )
 ```
+
+### Message Fragmentation
+
+The library handles MCTP message fragmentation for payloads exceeding packet size limits:
+
+```python
+from serialcables_sphinx.mctp import (
+    MCTPBuilder,
+    FragmentationConstants,
+    FragmentedMessage,
+)
+
+# Hardware constraints
+print(f"Max TX packet: {FragmentationConstants.MAX_TX_PACKET_SIZE} bytes")  # 128
+print(f"Max RX packet: {FragmentationConstants.MAX_RX_PACKET_SIZE} bytes")  # 256
+print(f"Max TX payload: {FragmentationConstants.MAX_TX_PAYLOAD} bytes")     # 120
+
+# Check if fragmentation needed
+builder = MCTPBuilder()
+large_payload = bytes(300)
+print(f"Needs fragmentation: {builder.needs_fragmentation(large_payload)}")
+print(f"Fragment count: {builder.calculate_fragment_count(large_payload)}")
+
+# Build fragmented message
+result = builder.build_fragmented(
+    dest_eid=1,
+    msg_type=0x04,
+    payload=large_payload,
+)
+
+# Send with timing control
+for fragment in result.fragments:
+    transport.send_packet(fragment.data)
+    time.sleep(0.005)  # 5ms inter-fragment delay
+```
+
+Fragmentation parameters:
+- **TX limit**: 128 bytes per packet (hardware constraint)
+- **RX limit**: 256 bytes per packet (MCU memory constraint)  
+- **Timing**: Fragments must arrive within ~100ms for device reassembly
+- **Sequence**: 2-bit counter (0-3) wraps for messages > 4 fragments
 
 ### Output Formats
 
@@ -186,17 +253,28 @@ sphinx = Sphinx(hydra, vendor_id=0x1234)
 
 ```python
 import pytest
-from serialcables_hydra import HYDRADevice
 from serialcables_sphinx import Sphinx
+from serialcables_sphinx.transports.mock import MockTransport
 
+# For unit tests, use mock transport
 @pytest.fixture
 def sphinx():
-    return Sphinx(HYDRADevice("/dev/ttyUSB0"))
+    mock = MockTransport()
+    return Sphinx(mock)
 
 def test_temperature_in_range(sphinx):
     result = sphinx.nvme_mi.health_status_poll(eid=1)
     assert result.success
-    assert 0 <= result['Composite Temperature'] <= 70
+    # Check decoded temperature field
+    temp_str = result['Composite Temperature']
+    assert "°C" in temp_str
+
+# For hardware integration tests
+@pytest.fixture
+def sphinx_hardware():
+    from serialcables_sphinx.transports.hydra import create_hydra_transport
+    transport = create_hydra_transport("/dev/ttyUSB0", slot=1)
+    return Sphinx(transport)
 ```
 
 ### LabView

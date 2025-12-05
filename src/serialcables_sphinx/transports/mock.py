@@ -1,0 +1,835 @@
+"""
+Mock transport for development and testing.
+
+Provides simulated HYDRA device behavior with configurable responses
+for NVMe-MI commands. Supports fragmentation for large payloads.
+
+Useful for:
+- Development without hardware
+- Unit testing
+- CI/CD pipelines
+- Demonstrating API usage
+- Tuning timing parameters to match real hardware
+
+Example:
+    from serialcables_sphinx import Sphinx
+    from serialcables_sphinx.transports.mock import MockTransport
+    
+    # Create mock with default responses
+    mock = MockTransport()
+    sphinx = Sphinx(mock)
+    
+    # Use normally
+    result = sphinx.nvme_mi.health_status_poll(eid=1)
+    print(result.pretty_print())
+    
+    # Check what was sent
+    print(f"Packets sent: {len(mock.sent_packets)}")
+    print(f"Last TX: {mock.sent_packets[-1].hex(' ')}")
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
+import struct
+import time
+
+from serialcables_sphinx.mctp.constants import MCTP_SMBUS_COMMAND_CODE
+from serialcables_sphinx.mctp.builder import MCTPBuilder
+from serialcables_sphinx.mctp.fragmentation import (
+    FragmentationConstants,
+    FragmentationConfig,
+    MessageReassembler,
+    PacketSequence,
+)
+from serialcables_sphinx.nvme_mi.opcodes import NVMeMIOpcode
+from serialcables_sphinx.nvme_mi.status import NVMeMIStatus
+from serialcables_sphinx.nvme_mi.constants import NVMeDataStructureType
+from serialcables_sphinx.transports.base import FragmentedTransportMixin
+
+
+@dataclass
+class MockDeviceState:
+    """
+    Simulated NVMe device state.
+    
+    Modify these values to simulate different device conditions.
+    """
+    # Health status
+    temperature_kelvin: int = 318  # 45°C
+    available_spare: int = 100  # 100%
+    spare_threshold: int = 10  # 10%
+    life_used: int = 5  # 5%
+    critical_warning: int = 0x00  # No warnings
+    
+    # Controller status
+    ready: bool = True
+    fatal_status: bool = False
+    shutdown_status: int = 0  # Normal operation
+    
+    # Subsystem info
+    num_ports: int = 1
+    nvme_mi_major: int = 1
+    nvme_mi_minor: int = 2
+    optional_commands: int = 0x1F  # Support config, VPD, reset
+    
+    # Controllers
+    controller_ids: List[int] = field(default_factory=lambda: [0, 1])
+    
+    # Port info
+    port_type: int = 0x02  # SMBus/I2C
+    max_mctp_mtu: int = 64
+    meb_size: int = 4096
+    
+    # VPD - can be set to large value to test fragmented responses
+    vpd_data: bytes = b"Serial Cables HYDRA Test Device\x00"
+    
+    # Response timing (tune to match real hardware)
+    response_delay_ms: float = 0.0
+    
+    # Fragmentation timing
+    inter_fragment_delay_ms: float = 1.0  # Delay between response fragments
+    fragment_jitter_ms: float = 0.5  # Random jitter on timing
+    
+    # Large data simulation
+    large_log_page: bytes = b""  # For testing fragmented responses
+
+
+@dataclass
+class FragmentTiming:
+    """Timing data for a fragment exchange."""
+    fragment_index: int
+    is_first: bool
+    is_last: bool
+    pkt_seq: int
+    tx_size: int
+    rx_size: int
+    latency_ms: float
+    timestamp: float
+
+
+class MockTransport(FragmentedTransportMixin):
+    """
+    Mock MCTP transport that simulates HYDRA device behavior.
+    
+    Provides configurable responses for NVMe-MI commands and
+    records all sent packets for verification in tests.
+    
+    Supports message fragmentation for:
+    - TX: Reassembles multi-fragment requests before processing
+    - RX: Can generate fragmented responses for large data
+    
+    Attributes:
+        state: Simulated device state (modify for different scenarios)
+        sent_packets: List of all packets sent via send_packet()
+        response_log: List of (request, response) tuples
+        fail_next: If True, next send_packet() raises an error
+        custom_handlers: Dict mapping opcodes to custom response generators
+        
+    Example:
+        mock = MockTransport()
+        
+        # Simulate low spare capacity warning
+        mock.state.available_spare = 5
+        mock.state.critical_warning = 0x01  # Spare below threshold
+        
+        sphinx = Sphinx(mock)
+        result = sphinx.nvme_mi.health_status_poll(eid=1)
+        # Result will show warning condition
+    """
+    
+    def __init__(
+        self,
+        state: Optional[MockDeviceState] = None,
+        verbose: bool = False,
+    ):
+        """
+        Initialize mock transport.
+        
+        Args:
+            state: Initial device state (uses defaults if None)
+            verbose: Print packets as they're sent/received
+        """
+        FragmentedTransportMixin.__init__(self)
+        
+        self.state = state or MockDeviceState()
+        self.verbose = verbose
+        
+        # Tracking
+        self.sent_packets: List[bytes] = []
+        self.response_log: List[Tuple[bytes, bytes]] = []
+        self.fragment_timings: List[FragmentTiming] = []
+        
+        # Error injection
+        self.fail_next: bool = False
+        self.fail_message: str = "Simulated transport error"
+        
+        # Custom response handlers
+        self.custom_handlers: Dict[int, Callable[[bytes, int], bytes]] = {}
+        
+        # Current slot selection
+        self._current_slot: Optional[int] = None
+        self._current_address: Optional[int] = None
+        
+        # Fragment reassembly for incoming requests
+        self._reassembler = MessageReassembler()
+        self._pending_request: Optional[bytes] = None
+        
+        # Response fragmentation state
+        self._response_pkt_seq = PacketSequence()
+    
+    def send_packet(self, packet: bytes) -> bytes:
+        """
+        Process packet and return simulated response.
+        
+        Handles both single packets and fragmented messages.
+        For fragmented requests, buffers until complete before responding.
+        
+        Args:
+            packet: Complete MCTP packet bytes
+            
+        Returns:
+            Simulated response bytes
+            
+        Raises:
+            RuntimeError: If fail_next is True
+        """
+        start_time = time.perf_counter()
+        
+        # Record sent packet
+        self.sent_packets.append(packet)
+        
+        if self.verbose:
+            print(f"[MockTransport] TX: {packet.hex(' ')}")
+        
+        # Error injection
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError(self.fail_message)
+        
+        # Check for fragmented request
+        if len(packet) >= 7:
+            flags_tag = packet[6]
+            som = bool(flags_tag & 0x80)
+            eom = bool(flags_tag & 0x40)
+            pkt_seq = (flags_tag >> 4) & 0x03
+            msg_tag = flags_tag & 0x07
+            
+            # Track fragment timing
+            timing = FragmentTiming(
+                fragment_index=len(self.fragment_timings),
+                is_first=som,
+                is_last=eom,
+                pkt_seq=pkt_seq,
+                tx_size=len(packet),
+                rx_size=0,  # Updated after response
+                latency_ms=0,
+                timestamp=time.time(),
+            )
+            
+            if not (som and eom):
+                # Multi-fragment message
+                if self.verbose:
+                    frag_type = "FIRST" if som else ("LAST" if eom else "MIDDLE")
+                    print(f"[MockTransport] Fragment: {frag_type} (seq={pkt_seq})")
+                
+                # Extract payload for reassembly
+                byte_count = packet[2]
+                msg_type_offset = 7
+                payload = packet[msg_type_offset:3 + byte_count]  # Before PEC
+                
+                try:
+                    src_eid = packet[5]
+                    complete = self._reassembler.process_fragment(
+                        payload=payload,
+                        msg_tag=msg_tag,
+                        src_eid=src_eid,
+                        pkt_seq=pkt_seq,
+                        som=som,
+                        eom=eom,
+                    )
+                    
+                    if complete is not None:
+                        # Got complete message - process it
+                        if self.verbose:
+                            print(f"[MockTransport] Reassembled: {len(complete)} bytes")
+                        
+                        # Reconstruct a "complete" packet for processing
+                        # Keep original SMBus + MCTP header but with reassembled payload
+                        reconstructed = packet[:7] + complete
+                        response = self._generate_response(reconstructed)
+                        
+                        timing.rx_size = len(response)
+                        timing.latency_ms = (time.perf_counter() - start_time) * 1000
+                        self.fragment_timings.append(timing)
+                        
+                        self.response_log.append((packet, response))
+                        
+                        if self.verbose:
+                            print(f"[MockTransport] RX: {response.hex(' ')}")
+                        
+                        return response
+                    else:
+                        # Still waiting for more fragments
+                        # Return empty ACK
+                        timing.rx_size = 0
+                        timing.latency_ms = (time.perf_counter() - start_time) * 1000
+                        self.fragment_timings.append(timing)
+                        
+                        return b""  # No response until complete
+                        
+                except ValueError as e:
+                    if self.verbose:
+                        print(f"[MockTransport] Reassembly error: {e}")
+                    return self._build_error_response(0x00, NVMeMIStatus.MESSAGE_FORMAT_ERROR)
+        
+        # Simulate response delay
+        if self.state.response_delay_ms > 0:
+            time.sleep(self.state.response_delay_ms / 1000.0)
+        
+        # Parse request and generate response
+        response = self._generate_response(packet)
+        
+        # Record exchange
+        self.response_log.append((packet, response))
+        
+        elapsed = (time.perf_counter() - start_time) * 1000
+        
+        if self.verbose:
+            print(f"[MockTransport] RX: {response.hex(' ')} ({elapsed:.2f}ms)")
+        
+        return response
+    
+    def set_target(
+        self,
+        slot: Optional[int] = None,
+        address: Optional[int] = None,
+    ) -> None:
+        """
+        Set target slot/address (simulated mux routing).
+        
+        Args:
+            slot: Slot number
+            address: Bus address
+        """
+        if slot is not None:
+            self._current_slot = slot
+            if self.verbose:
+                print(f"[MockTransport] Selected slot {slot}")
+        
+        if address is not None:
+            self._current_address = address
+            if self.verbose:
+                print(f"[MockTransport] Set address 0x{address:02X}")
+    
+    def _generate_response(self, packet: bytes) -> bytes:
+        """Generate simulated response for request packet."""
+        # Parse MCTP framing
+        if len(packet) < 9:
+            return self._build_error_response(0x00, NVMeMIStatus.MESSAGE_FORMAT_ERROR)
+        
+        smbus_addr = packet[0]
+        # smbus_cmd = packet[1]  # Should be 0x0F
+        # byte_count = packet[2]
+        
+        # MCTP header at offset 3-6
+        # header_version = packet[3] & 0x0F
+        dest_eid = packet[4]
+        src_eid = packet[5]
+        flags_tag = packet[6]
+        
+        # Message type at offset 7
+        msg_type = packet[7] & 0x7F
+        
+        # For NVMe-MI (type 0x04), extract opcode
+        if msg_type != 0x04:
+            # Not NVMe-MI, return generic error
+            return self._build_error_response(0x00, NVMeMIStatus.INVALID_OPCODE)
+        
+        # NVMe-MI payload starts at offset 8
+        # Format: [Opcode][Reserved x3][Data...]
+        if len(packet) < 12:
+            return self._build_error_response(0x00, NVMeMIStatus.INVALID_COMMAND_SIZE)
+        
+        opcode = packet[8]
+        request_data = packet[12:] if len(packet) > 12 else b""
+        
+        # Check for custom handler
+        if opcode in self.custom_handlers:
+            response_payload = self.custom_handlers[opcode](request_data, dest_eid)
+        else:
+            # Use built-in handlers
+            response_payload = self._handle_opcode(opcode, request_data)
+        
+        # Build complete MCTP response
+        return self._build_mctp_response(
+            response_payload,
+            src_eid=dest_eid,  # Swap for response
+            dest_eid=src_eid,
+            msg_tag=flags_tag & 0x07,
+            smbus_addr=0x20,  # Response address (host)
+        )
+    
+    def _handle_opcode(self, opcode: int, data: bytes) -> bytes:
+        """Route opcode to appropriate handler."""
+        handlers = {
+            NVMeMIOpcode.READ_NVME_MI_DATA_STRUCTURE: self._handle_read_data_structure,
+            NVMeMIOpcode.NVM_SUBSYSTEM_HEALTH_STATUS_POLL: self._handle_health_status,
+            NVMeMIOpcode.CONTROLLER_HEALTH_STATUS_POLL: self._handle_controller_health,
+            NVMeMIOpcode.CONFIGURATION_GET: self._handle_config_get,
+            NVMeMIOpcode.CONFIGURATION_SET: self._handle_config_set,
+            NVMeMIOpcode.VPD_READ: self._handle_vpd_read,
+            NVMeMIOpcode.MI_RESET: self._handle_mi_reset,
+        }
+        
+        handler = handlers.get(opcode)
+        if handler:
+            return handler(data)
+        
+        # Unknown opcode
+        return self._build_mi_response(NVMeMIStatus.INVALID_OPCODE, b"")
+    
+    def _handle_health_status(self, data: bytes) -> bytes:
+        """Generate NVM Subsystem Health Status Poll response."""
+        s = self.state
+        
+        # Build CCS byte
+        ccs = (
+            (int(s.ready) << 0) |
+            (int(s.fatal_status) << 1) |
+            ((s.shutdown_status & 0x03) << 2)
+        )
+        
+        # Response: [CCS][CW][Temp_L][Temp_H][LifeUsed][SpareThresh][Spare]
+        payload = struct.pack(
+            "<BBHBBB",
+            ccs,
+            s.critical_warning,
+            s.temperature_kelvin,
+            s.life_used,
+            s.spare_threshold,
+            s.available_spare,
+        )
+        
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, payload)
+    
+    def _handle_controller_health(self, data: bytes) -> bytes:
+        """Generate Controller Health Status Poll response."""
+        s = self.state
+        
+        # Parse controller ID from request
+        ctrl_id = struct.unpack("<H", data[0:2])[0] if len(data) >= 2 else 0
+        
+        # Check if controller exists
+        if ctrl_id not in s.controller_ids:
+            return self._build_mi_response(NVMeMIStatus.INVALID_PARAMETER, b"")
+        
+        # Build controller status byte
+        csts = (
+            (int(s.ready) << 0) |
+            (int(s.fatal_status) << 1) |
+            ((s.shutdown_status & 0x03) << 2)
+        )
+        
+        # Response format per spec
+        payload = struct.pack(
+            "<HBBHHHHBBB",
+            ctrl_id,
+            csts,
+            0,  # Reserved
+            s.temperature_kelvin,
+            s.temperature_kelvin + 20,  # Warning threshold (65°C above)
+            s.temperature_kelvin + 40,  # Critical threshold (85°C above)
+            0,  # Reserved
+            s.available_spare,
+            s.spare_threshold,
+            s.life_used,
+        )
+        
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, payload)
+    
+    def _handle_read_data_structure(self, data: bytes) -> bytes:
+        """Generate Read NVMe-MI Data Structure response."""
+        if len(data) < 1:
+            return self._build_mi_response(NVMeMIStatus.INVALID_PARAMETER, b"")
+        
+        data_type = data[0]
+        s = self.state
+        
+        if data_type == NVMeDataStructureType.NVM_SUBSYSTEM_INFORMATION:
+            # Subsystem info
+            payload = struct.pack(
+                "<BBBBI",
+                s.num_ports,
+                s.nvme_mi_major,
+                s.nvme_mi_minor,
+                0,  # Reserved
+                s.optional_commands,
+            )
+        
+        elif data_type == NVMeDataStructureType.CONTROLLER_LIST:
+            # Controller list
+            num_ctrls = len(s.controller_ids)
+            payload = struct.pack("<BB", num_ctrls, 0)  # Count + reserved
+            for ctrl_id in s.controller_ids:
+                payload += struct.pack("<H", ctrl_id)
+        
+        elif data_type == NVMeDataStructureType.PORT_INFORMATION:
+            # Port info
+            payload = struct.pack(
+                "<BBHI",
+                s.port_type,
+                0,  # Reserved
+                s.max_mctp_mtu,
+                s.meb_size,
+            )
+        
+        elif data_type == NVMeDataStructureType.CONTROLLER_INFORMATION:
+            # Controller info (simplified)
+            ctrl_id = data[1] if len(data) > 1 else 0
+            if ctrl_id not in s.controller_ids:
+                return self._build_mi_response(NVMeMIStatus.INVALID_PARAMETER, b"")
+            payload = struct.pack("<HBB", ctrl_id, 0x01, 0x00)  # Minimal info
+        
+        else:
+            return self._build_mi_response(NVMeMIStatus.INVALID_PARAMETER, b"")
+        
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, payload)
+    
+    def _handle_config_get(self, data: bytes) -> bytes:
+        """Generate Configuration Get response."""
+        if len(data) < 1:
+            return self._build_mi_response(NVMeMIStatus.INVALID_PARAMETER, b"")
+        
+        config_id = data[0]
+        
+        # Return some default config values
+        if config_id == 0x01:  # SMBus/I2C frequency
+            payload = struct.pack("<I", 400000)  # 400 kHz
+        elif config_id == 0x02:  # Health status change
+            payload = struct.pack("<I", 0)
+        elif config_id == 0x03:  # MCTP MTU
+            payload = struct.pack("<H", self.state.max_mctp_mtu)
+        else:
+            return self._build_mi_response(NVMeMIStatus.INVALID_PARAMETER, b"")
+        
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, payload)
+    
+    def _handle_config_set(self, data: bytes) -> bytes:
+        """Generate Configuration Set response."""
+        # Just acknowledge success
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, b"")
+    
+    def _handle_vpd_read(self, data: bytes) -> bytes:
+        """Generate VPD Read response."""
+        s = self.state
+        
+        # Parse offset and length from request
+        offset = struct.unpack("<H", data[0:2])[0] if len(data) >= 2 else 0
+        length = struct.unpack("<H", data[2:4])[0] if len(data) >= 4 else 256
+        
+        # Get VPD slice
+        vpd_slice = s.vpd_data[offset:offset + length]
+        
+        # Response: [Length (2)][Data...]
+        payload = struct.pack("<H", len(vpd_slice)) + vpd_slice
+        
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, payload)
+    
+    def _handle_mi_reset(self, data: bytes) -> bytes:
+        """Generate MI Reset response."""
+        # Reset state to defaults
+        self.state.ready = True
+        self.state.fatal_status = False
+        self.state.shutdown_status = 0
+        
+        return self._build_mi_response(NVMeMIStatus.SUCCESS, b"")
+    
+    def _build_mi_response(self, status: int, payload: bytes) -> bytes:
+        """
+        Build NVMe-MI response payload.
+        
+        Format: [ResponseType][Status][Reserved][Reserved][Payload...]
+        """
+        return bytes([
+            0x02,  # MI Response type
+            status,
+            0x00,  # Reserved
+            0x00,  # Reserved
+        ]) + payload
+    
+    def _build_error_response(self, opcode: int, status: int) -> bytes:
+        """Build error response for given status."""
+        mi_response = self._build_mi_response(status, b"")
+        return self._build_mctp_response(mi_response)
+    
+    def _build_mctp_response(
+        self,
+        payload: bytes,
+        src_eid: int = 1,
+        dest_eid: int = 0,
+        msg_tag: int = 0,
+        smbus_addr: int = 0x20,
+    ) -> bytes:
+        """
+        Build complete MCTP-over-SMBus response.
+        
+        Automatically uses fragmentation if payload exceeds RX limit.
+        For fragmented responses, returns only the first fragment
+        (caller should handle multi-fragment retrieval in real implementation).
+        
+        Args:
+            payload: NVMe-MI response payload (including MI header)
+            src_eid: Source EID (device)
+            dest_eid: Destination EID (host)
+            msg_tag: Message tag from request
+            smbus_addr: Response SMBus address
+            
+        Returns:
+            Complete MCTP packet bytes (first fragment if fragmented)
+        """
+        # Check if payload fits in single packet
+        # Payload + msg_type byte + MCTP header (4) must fit in byte_count (max 255)
+        max_single_payload = FragmentationConstants.MAX_RX_PAYLOAD - 1  # -1 for msg_type
+        
+        if len(payload) > max_single_payload:
+            # Need fragmented response
+            fragments = self._build_fragmented_response(
+                payload=payload,
+                src_eid=src_eid,
+                dest_eid=dest_eid,
+                msg_tag=msg_tag,
+                smbus_addr=smbus_addr,
+            )
+            
+            if self.verbose:
+                print(f"[MockTransport] Response requires {len(fragments)} fragments")
+            
+            # For now, return concatenated fragments
+            # Real hardware would require multiple reads
+            # This simulates the full reassembled response
+            return fragments[0] if len(fragments) == 1 else b''.join(fragments)
+        
+        # Standard single-packet response
+        # MCTP header
+        header_byte0 = 0x01  # Version
+        flags_tag = 0xC0 | msg_tag  # SOM=1, EOM=1, TO=0, Tag
+        
+        mctp_header = bytes([header_byte0, dest_eid, src_eid, flags_tag])
+        
+        # Message type (NVMe-MI = 0x04)
+        msg_type = 0x04
+        
+        # Full MCTP message
+        mctp_message = mctp_header + bytes([msg_type]) + payload
+        
+        # SMBus framing
+        byte_count = len(mctp_message)
+        packet = bytes([
+            smbus_addr,
+            MCTP_SMBUS_COMMAND_CODE,
+            byte_count,
+        ]) + mctp_message
+        
+        # Add PEC
+        pec = MCTPBuilder.calculate_pec(packet)
+        packet += bytes([pec])
+        
+        return packet
+    
+    def _build_fragmented_response(
+        self,
+        payload: bytes,
+        src_eid: int = 1,
+        dest_eid: int = 0,
+        msg_tag: int = 0,
+        smbus_addr: int = 0x20,
+        max_payload: int = FragmentationConstants.MAX_RX_PAYLOAD,
+    ) -> List[bytes]:
+        """
+        Build fragmented MCTP response for large payloads.
+        
+        Splits response into multiple fragments that fit within RX limit.
+        
+        Args:
+            payload: Complete NVMe-MI response payload
+            src_eid: Source EID (device)
+            dest_eid: Destination EID (host)
+            msg_tag: Message tag from request
+            smbus_addr: Response SMBus address
+            max_payload: Max payload per fragment
+            
+        Returns:
+            List of MCTP packet fragments
+        """
+        # Message type byte is part of the payload on wire
+        msg_type = 0x04  # NVMe-MI
+        wire_payload = bytes([msg_type]) + payload
+        
+        if len(wire_payload) <= max_payload:
+            # Fits in single packet
+            return [self._build_mctp_response(payload, src_eid, dest_eid, msg_tag, smbus_addr)]
+        
+        fragments = []
+        self._response_pkt_seq.reset()
+        offset = 0
+        
+        while offset < len(wire_payload):
+            chunk = wire_payload[offset:offset + max_payload]
+            is_first = (offset == 0)
+            is_last = (offset + len(chunk) >= len(wire_payload))
+            pkt_seq = self._response_pkt_seq.next()
+            
+            # Build flags byte: SOM, EOM, pkt_seq, TO=0, msg_tag
+            flags_tag = msg_tag & 0x07  # Tag in lower 3 bits
+            if is_first:
+                flags_tag |= 0x80  # SOM
+            if is_last:
+                flags_tag |= 0x40  # EOM
+            flags_tag |= (pkt_seq << 4)  # Packet sequence
+            
+            # MCTP header
+            mctp_header = bytes([0x01, dest_eid, src_eid, flags_tag])
+            
+            # For first fragment, chunk includes msg_type
+            # For subsequent fragments, chunk is continuation data
+            mctp_message = mctp_header + chunk
+            
+            # SMBus framing
+            byte_count = len(mctp_message)
+            packet = bytes([
+                smbus_addr,
+                MCTP_SMBUS_COMMAND_CODE,
+                byte_count,
+            ]) + mctp_message
+            
+            # Add PEC
+            pec = MCTPBuilder.calculate_pec(packet)
+            packet += bytes([pec])
+            
+            fragments.append(packet)
+            offset += len(chunk)
+        
+        if self.verbose:
+            print(f"[MockTransport] Generated {len(fragments)} response fragments")
+        
+        return fragments
+    
+    def set_large_vpd(self, size: int = 512) -> None:
+        """
+        Set VPD to a large value to test fragmented responses.
+        
+        Args:
+            size: Total VPD size in bytes
+        """
+        # Generate test VPD data
+        vpd = b"Serial Cables HYDRA - Large VPD Test\n"
+        vpd += b"=" * 40 + b"\n"
+        
+        # Fill with structured data
+        while len(vpd) < size:
+            remaining = size - len(vpd)
+            line = f"VPD Offset 0x{len(vpd):04X}: Test data block\n".encode()
+            if len(line) > remaining:
+                vpd += b"X" * remaining
+            else:
+                vpd += line
+        
+        self.state.vpd_data = vpd[:size]
+    
+    def get_timing_summary(self) -> dict:
+        """
+        Get summary of fragment timing data.
+        
+        Returns:
+            Dict with min/max/avg latencies and fragment counts
+        """
+        if not self.fragment_timings:
+            return {
+                "fragment_count": 0,
+                "min_latency_ms": 0,
+                "max_latency_ms": 0,
+                "avg_latency_ms": 0,
+            }
+        
+        latencies = [t.latency_ms for t in self.fragment_timings]
+        
+        return {
+            "fragment_count": len(self.fragment_timings),
+            "min_latency_ms": min(latencies),
+            "max_latency_ms": max(latencies),
+            "avg_latency_ms": sum(latencies) / len(latencies),
+            "total_tx_bytes": sum(t.tx_size for t in self.fragment_timings),
+            "total_rx_bytes": sum(t.rx_size for t in self.fragment_timings),
+        }
+    
+    # =========================================================================
+    # Test Helpers
+    # =========================================================================
+    
+    def reset(self) -> None:
+        """Reset tracking state (keeps device state)."""
+        self.sent_packets.clear()
+        self.response_log.clear()
+        self.fragment_timings.clear()
+        self.fail_next = False
+        self._reassembler.reset()
+    
+    def reset_all(self) -> None:
+        """Reset everything including device state."""
+        self.reset()
+        self.state = MockDeviceState()
+    
+    def get_last_request(self) -> Optional[bytes]:
+        """Get the last packet sent."""
+        return self.sent_packets[-1] if self.sent_packets else None
+    
+    def get_last_opcode(self) -> Optional[int]:
+        """Extract opcode from last request."""
+        if not self.sent_packets:
+            return None
+        packet = self.sent_packets[-1]
+        if len(packet) >= 9:
+            return packet[8]
+        return None
+    
+    def inject_error(self, message: str = "Simulated transport error") -> None:
+        """Make next send_packet() raise an error."""
+        self.fail_next = True
+        self.fail_message = message
+    
+    def register_handler(
+        self,
+        opcode: int,
+        handler: Callable[[bytes, int], bytes],
+    ) -> None:
+        """
+        Register custom response handler for an opcode.
+        
+        Args:
+            opcode: NVMe-MI opcode to handle
+            handler: Function(request_data, dest_eid) -> response_payload
+        """
+        self.custom_handlers[opcode] = handler
+    
+    def set_temperature(self, celsius: int) -> None:
+        """Convenience: set device temperature in Celsius."""
+        self.state.temperature_kelvin = celsius + 273
+    
+    def set_warning_condition(self) -> None:
+        """Set device to warning state (low spare, high temp)."""
+        self.state.available_spare = 5
+        self.state.critical_warning = 0x03  # Spare + temp warnings
+        self.state.temperature_kelvin = 358  # 85°C
+    
+    def set_critical_condition(self) -> None:
+        """Set device to critical state."""
+        self.state.fatal_status = True
+        self.state.critical_warning = 0x0F
+        self.state.available_spare = 0
+        self.state.life_used = 100
+
+
+# Convenience aliases
+MockHYDRA = MockTransport
+MockHYDRADevice = MockTransport
