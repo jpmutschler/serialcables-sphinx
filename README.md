@@ -42,8 +42,7 @@ from serialcables_sphinx import Sphinx
 from serialcables_sphinx.transports.hydra import HYDRATransport
 
 # Connect to HYDRA enclosure
-jbof = JBOFController()
-jbof.connect("/dev/ttyUSB0")  # or "COM3" on Windows
+jbof = JBOFController(port="/dev/ttyUSB0")  # or "COM3" on Windows
 
 # Create transport adapter for slot 1
 transport = HYDRATransport(jbof, slot=1)

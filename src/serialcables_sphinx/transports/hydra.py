@@ -10,8 +10,7 @@ Example:
     from serialcables_sphinx.transports.hydra import HYDRATransport
     
     # Connect to HYDRA
-    jbof = JBOFController()
-    jbof.connect("/dev/ttyUSB0")
+    jbof = JBOFController(port="/dev/ttyUSB0")
     
     # Wrap with transport adapter
     transport = HYDRATransport(jbof, slot=1)
@@ -53,8 +52,7 @@ class HYDRATransport:
         from serialcables_hydra import JBOFController
         from serialcables_sphinx.transports.hydra import HYDRATransport
         
-        jbof = JBOFController()
-        jbof.connect("/dev/ttyUSB0")
+        jbof = JBOFController(port="/dev/ttyUSB0")
         
         transport = HYDRATransport(jbof, slot=1)
         
@@ -269,7 +267,6 @@ def create_hydra_transport(
     """
     from serialcables_hydra import JBOFController
     
-    jbof = JBOFController()
-    jbof.connect(port)
+    jbof = JBOFController(port=port)
     
     return HYDRATransport(jbof, slot=slot, **kwargs)

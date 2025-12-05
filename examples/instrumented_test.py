@@ -431,8 +431,7 @@ def main():
         print(f"Transport: MockTransport (delay={args.mock_delay}ms)")
     else:
         print(f"\nConnecting to HYDRA on {args.port}...")
-        jbof = JBOFController()
-        jbof.connect(args.port)
+        jbof = JBOFController(port=args.port)
         inner_transport = HYDRATransport(jbof, slot=args.slot)
         print(f"Transport: HYDRATransport ({args.port}, slot={args.slot})")
     
