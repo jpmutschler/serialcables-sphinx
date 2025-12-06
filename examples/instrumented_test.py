@@ -7,12 +7,13 @@ Captures:
 - Raw TX/RX packet bytes
 - Parsed response structure
 - Error patterns
+- HYDRA MCTPResponse details
 
 Use this data to tune MockTransport responses to match real hardware.
 
 Usage:
     python -m examples.instrumented_test --port /dev/ttyUSB0 --slot 1
-    python -m examples.instrumented_test --port /dev/ttyUSB0 --slot 1 --output capture.json
+    python -m examples.instrumented_test --port COM13 --slot 1 --output capture.json
     python -m examples.instrumented_test --mock  # Test the instrumentation itself
 """
 
@@ -32,11 +33,13 @@ from serialcables_sphinx.mctp.builder import MCTPBuilder
 
 # Try to import real HYDRA transport
 try:
-    from serialcables_sphinx.transports.hydra import HYDRATransport
-    from serialcables_hydra import JBOFController
+    from serialcables_sphinx.transports.hydra import HYDRATransport, HYDRAPacketResult
+    from serialcables_hydra import JBOFController, MCTPResponse
     HAVE_HYDRA = True
 except ImportError:
     HAVE_HYDRA = False
+    MCTPResponse = None
+    HYDRAPacketResult = None
 
 
 @dataclass
@@ -58,6 +61,16 @@ class PacketCapture:
     pec_valid: Optional[bool] = None
 
 
+@dataclass
+class HYDRAResponseCapture:
+    """Capture of HYDRA MCTPResponse details."""
+    success: bool
+    packets_sent: int
+    response_packet_count: int
+    raw_response: str
+    latency_ms: float
+
+
 @dataclass 
 class CommandCapture:
     """Complete command/response exchange."""
@@ -75,6 +88,9 @@ class CommandCapture:
     # Packets
     tx_packet: PacketCapture
     rx_packet: Optional[PacketCapture] = None
+    
+    # HYDRA-specific response data
+    hydra_response: Optional[HYDRAResponseCapture] = None
     
     # Response
     success: bool = False
@@ -95,6 +111,8 @@ class TestSession:
     port: Optional[str] = None
     slot: int = 1
     is_mock: bool = False
+    hydra_version: Optional[str] = None
+    sphinx_version: Optional[str] = None
     
     # Statistics
     total_commands: int = 0
@@ -125,6 +143,8 @@ class TestSession:
 class InstrumentedTransport:
     """
     Wrapper transport that captures all packets with timing.
+    
+    When wrapping HYDRATransport, also captures MCTPResponse details.
     """
     
     def __init__(self, inner_transport, session: TestSession, slot: int = 1):
@@ -133,6 +153,9 @@ class InstrumentedTransport:
         self._slot = slot
         self._parser = MCTPParser()
         self._current_capture: Optional[CommandCapture] = None
+        
+        # Check if inner transport is HYDRATransport (has last_result property)
+        self._is_hydra = hasattr(inner_transport, 'last_result')
     
     def send_packet(self, packet: bytes) -> bytes:
         """Send packet and capture timing/data."""
@@ -183,12 +206,31 @@ class InstrumentedTransport:
             self._current_capture.rx_packet = rx_capture
             self._current_capture.success = True
             
+            # Capture HYDRA-specific data if available
+            if self._is_hydra and self._inner.last_result is not None:
+                hydra_result = self._inner.last_result
+                self._current_capture.hydra_response = HYDRAResponseCapture(
+                    success=hydra_result.success,
+                    packets_sent=hydra_result.packets_sent,
+                    response_packet_count=1,  # Could parse from raw_response
+                    raw_response=hydra_result.raw_response[:200],  # Truncate for JSON
+                    latency_ms=hydra_result.latency_ms,
+                )
+                
+                # Use HYDRA's more accurate timing
+                self._current_capture.latency_ms = hydra_result.latency_ms
+            
             print(f"[RX] Response ({len(response)} bytes): {response.hex(' ')}")
             print(f"     Latency: {self._current_capture.latency_ms:.2f} ms")
             
             if rx_capture.pec_valid is not None:
                 pec_status = "✓ valid" if rx_capture.pec_valid else "✗ INVALID"
                 print(f"     PEC: 0x{rx_capture.pec:02X} ({pec_status})")
+            
+            # Show HYDRA details if available
+            if self._current_capture.hydra_response:
+                hr = self._current_capture.hydra_response
+                print(f"     HYDRA: packets_sent={hr.packets_sent}")
             
             return response
             
@@ -198,6 +240,18 @@ class InstrumentedTransport:
             self._current_capture.latency_ms = (rx_time - tx_time) * 1000
             self._current_capture.success = False
             self._current_capture.error = str(e)
+            
+            # Capture HYDRA error details if available
+            if self._is_hydra and self._inner.last_result is not None:
+                hydra_result = self._inner.last_result
+                self._current_capture.hydra_response = HYDRAResponseCapture(
+                    success=hydra_result.success,
+                    packets_sent=hydra_result.packets_sent,
+                    response_packet_count=0,
+                    raw_response=hydra_result.raw_response[:200],
+                    latency_ms=hydra_result.latency_ms,
+                )
+                print(f"     HYDRA raw: {hydra_result.raw_response[:100]}")
             
             print(f"[ERROR] {e}")
             print(f"     Latency: {self._current_capture.latency_ms:.2f} ms")
@@ -389,6 +443,12 @@ def main():
         help="Target Endpoint ID (default: 1)",
     )
     parser.add_argument(
+        "-t", "--timeout",
+        type=float,
+        default=2.0,
+        help="MCTP response timeout in seconds (default: 2.0)",
+    )
+    parser.add_argument(
         "-o", "--output",
         help="Output JSON file for captured data",
     )
@@ -406,18 +466,35 @@ def main():
     
     args = parser.parse_args()
     
+    # Get version info
+    try:
+        import serialcables_sphinx
+        sphinx_version = getattr(serialcables_sphinx, '__version__', 'unknown')
+    except:
+        sphinx_version = 'unknown'
+    
+    try:
+        import serialcables_hydra
+        hydra_version = getattr(serialcables_hydra, '__version__', 'unknown')
+    except:
+        hydra_version = 'not installed'
+    
     # Create session
     session = TestSession(
         start_time=datetime.now().isoformat(),
         port=None if args.mock else args.port,
         slot=args.slot,
         is_mock=args.mock,
+        sphinx_version=sphinx_version,
+        hydra_version=hydra_version,
     )
     
     print("=" * 60)
     print("INSTRUMENTED HARDWARE TEST")
     print("=" * 60)
     print(f"Time: {session.start_time}")
+    print(f"Sphinx version: {sphinx_version}")
+    print(f"HYDRA version: {hydra_version}")
     
     # Create transport
     if args.mock or not HAVE_HYDRA:
@@ -432,8 +509,8 @@ def main():
     else:
         print(f"\nConnecting to HYDRA on {args.port}...")
         jbof = JBOFController(port=args.port)
-        inner_transport = HYDRATransport(jbof, slot=args.slot)
-        print(f"Transport: HYDRATransport ({args.port}, slot={args.slot})")
+        inner_transport = HYDRATransport(jbof, slot=args.slot, timeout=args.timeout)
+        print(f"Transport: HYDRATransport ({args.port}, slot={args.slot}, timeout={args.timeout}s)")
     
     # Wrap with instrumentation
     instrumented = InstrumentedTransport(inner_transport, session, slot=args.slot)
@@ -467,6 +544,9 @@ def main():
         if capture.rx_packet:
             print(f"    RX: {capture.rx_packet.data_hex}")
             print(f"    Latency: {capture.latency_ms:.2f} ms")
+        if capture.hydra_response:
+            hr = capture.hydra_response
+            print(f"    HYDRA: success={hr.success}, packets_sent={hr.packets_sent}")
         if capture.error:
             print(f"    ERROR: {capture.error}")
     

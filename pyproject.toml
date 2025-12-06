@@ -40,7 +40,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "serialcables-hydra>=0.1.0",
+    "serialcables-hydra>=1.1.0",
 ]
 
 [project.optional-dependencies]
