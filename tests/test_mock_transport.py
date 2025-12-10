@@ -253,22 +253,29 @@ class TestOutputFormats:
 
 class TestMCTPBuilder:
     """Tests for MCTP packet building."""
-    
+
     def test_build_health_poll_packet(self):
         """Test building health poll packet."""
         mock = MockTransport()
         sphinx = Sphinx(mock)
-        
+
+        # Use NVMeMIRequest.pack() format: [NMIMT/ROR][Opcode][Reserved x2]
+        # NMIMT/ROR = 0x01 for MI Command Request
         packet = sphinx.mctp.build_nvme_mi_request(
             dest_eid=1,
-            payload=bytes([0x01, 0x00, 0x00, 0x00]),  # Health poll opcode
+            payload=bytes([0x01, 0x01, 0x00, 0x00]),  # [NMIMT/ROR, Opcode, Reserved, Reserved]
         )
-        
-        # Verify structure
+
+        # Verify structure (with SMBus source addr at offset 3)
+        # [0]=SMBus dest, [1]=Cmd code, [2]=Byte count, [3]=SMBus src
+        # [4]=MCTP ver, [5]=Dest EID, [6]=Src EID, [7]=Flags/Tag
+        # [8]=Msg type, [9+]=Payload
         assert packet[0] == 0x3A  # Default SMBus address
         assert packet[1] == 0x0F  # MCTP command code
-        assert packet[7] == 0x04  # NVMe-MI message type
-        assert packet[8] == 0x01  # Health poll opcode
+        assert packet[3] == 0x21  # SMBus source address
+        assert packet[8] == 0x04  # NVMe-MI message type
+        assert packet[9] == 0x01  # NMIMT/ROR (MI Command)
+        assert packet[10] == 0x01  # Health poll opcode
     
     def test_pec_calculation(self):
         """Test PEC is appended."""

@@ -210,8 +210,9 @@ class MockTransport(FragmentedTransportMixin):
             raise RuntimeError(self.fail_message)
 
         # Check for fragmented request
-        if len(packet) >= 7:
-            flags_tag = packet[6]
+        # With SMBus src addr at offset 3, flags_tag is at offset 7
+        if len(packet) >= 8:
+            flags_tag = packet[7]
             som = bool(flags_tag & 0x80)
             eom = bool(flags_tag & 0x40)
             pkt_seq = (flags_tag >> 4) & 0x03
@@ -236,12 +237,13 @@ class MockTransport(FragmentedTransportMixin):
                     print(f"[MockTransport] Fragment: {frag_type} (seq={pkt_seq})")
 
                 # Extract payload for reassembly
+                # byte_count includes SMBus src addr, so payload starts after MCTP header
                 byte_count = packet[2]
-                msg_type_offset = 7
+                msg_type_offset = 8  # After SMBus(4) + MCTP header(4)
                 payload = packet[msg_type_offset : 3 + byte_count]  # Before PEC
 
                 try:
-                    src_eid = packet[5]
+                    src_eid = packet[6]
                     complete = self._reassembler.process_fragment(
                         payload=payload,
                         msg_tag=msg_tag,
@@ -258,7 +260,7 @@ class MockTransport(FragmentedTransportMixin):
 
                         # Reconstruct a "complete" packet for processing
                         # Keep original SMBus + MCTP header but with reassembled payload
-                        reconstructed = packet[:7] + complete
+                        reconstructed = packet[:8] + complete
                         response = self._generate_response(reconstructed)
 
                         timing.rx_size = len(response)
@@ -326,35 +328,39 @@ class MockTransport(FragmentedTransportMixin):
 
     def _generate_response(self, packet: bytes) -> bytes:
         """Generate simulated response for request packet."""
-        # Parse MCTP framing
-        if len(packet) < 9:
+        # Parse MCTP-over-SMBus framing
+        # Format: [SMBus dest][Cmd code][Byte count][SMBus src][MCTP header...][Msg type][Payload][PEC]
+        if len(packet) < 13:
             return self._build_error_response(0x00, NVMeMIStatus.MESSAGE_FORMAT_ERROR)
 
-        packet[0]
-        # smbus_cmd = packet[1]  # Should be 0x0F
+        # smbus_dest = packet[0]  # 0x3A for NVMe-MI
+        # smbus_cmd = packet[1]   # Should be 0x0F
         # byte_count = packet[2]
+        # smbus_src = packet[3]   # 0x21 for host
 
-        # MCTP header at offset 3-6
-        # header_version = packet[3] & 0x0F
-        dest_eid = packet[4]
-        src_eid = packet[5]
-        flags_tag = packet[6]
+        # MCTP header at offset 4-7
+        # header_version = packet[4] & 0x0F
+        dest_eid = packet[5]
+        src_eid = packet[6]
+        flags_tag = packet[7]
 
-        # Message type at offset 7
-        msg_type = packet[7] & 0x7F
+        # Message type at offset 8
+        msg_type = packet[8] & 0x7F
 
         # For NVMe-MI (type 0x04), extract opcode
         if msg_type != 0x04:
             # Not NVMe-MI, return generic error
             return self._build_error_response(0x00, NVMeMIStatus.INVALID_OPCODE)
 
-        # NVMe-MI payload starts at offset 8
-        # Format: [Opcode][Reserved x3][Data...]
-        if len(packet) < 12:
+        # NVMe-MI payload starts at offset 9
+        # Format: [NMIMT/ROR][Opcode][Reserved x2][Data...]
+        # NMIMT/ROR byte: bits 7=ROR (0=request), bits 3:0=NMIMT (1=MI Command, 4=Admin)
+        if len(packet) < 13:
             return self._build_error_response(0x00, NVMeMIStatus.INVALID_COMMAND_SIZE)
 
-        opcode = packet[8]
-        request_data = packet[12:] if len(packet) > 12 else b""
+        # nmimt_ror = packet[9]   # 0x01 for MI Command, 0x04 for Admin
+        opcode = packet[10]
+        request_data = packet[13:] if len(packet) > 13 else b""
 
         # Check for custom handler
         if opcode in self.custom_handlers:
@@ -798,8 +804,10 @@ class MockTransport(FragmentedTransportMixin):
         if not self.sent_packets:
             return None
         packet = self.sent_packets[-1]
-        if len(packet) >= 9:
-            return packet[8]
+        # Opcode is at offset 10:
+        # [0-2]=SMBus header, [3]=SMBus src, [4-7]=MCTP header, [8]=MsgType, [9]=NMIMT/ROR, [10]=Opcode
+        if len(packet) >= 11:
+            return packet[10]
         return None
 
     def inject_error(self, message: str = "Simulated transport error") -> None:
