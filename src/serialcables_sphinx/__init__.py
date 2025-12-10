@@ -5,14 +5,22 @@ This library provides MCTP packet building, NVMe-MI command encoding,
 and response decoding for use with HYDRA enclosures and NVMe devices.
 
 Example:
-    from serialcables_hydra import HYDRADevice
+    from serialcables_hydra import JBOFController
     from serialcables_sphinx import Sphinx
+    from serialcables_sphinx.transports.hydra import HYDRATransport
 
-    hydra = HYDRADevice("/dev/ttyUSB0")
-    sphinx = Sphinx(hydra)
+    jbof = JBOFController(port="/dev/ttyUSB0")
+    transport = HYDRATransport(jbof, slot=1)
+    sphinx = Sphinx(transport)
 
     result = sphinx.nvme_mi.health_status_poll(eid=1)
     print(result.pretty_print())
+    
+    # Or use firmware shortcuts (HYDRA firmware v0.0.6+)
+    from serialcables_sphinx.shortcuts import MCTPShortcuts
+    shortcuts = MCTPShortcuts(jbof)
+    health = shortcuts.get_health_status(slot=1)
+    print(f"Temperature: {health.temperature_celsius}°C")
 """
 
 __version__ = "0.1.0"
@@ -47,6 +55,15 @@ from serialcables_sphinx.nvme_mi.constants import (
 # Transport interface
 from serialcables_sphinx.transports.base import MCTPTransport
 
+# Shortcuts (firmware convenience commands)
+from serialcables_sphinx.shortcuts import (
+    MCTPShortcuts,
+    SerialNumberResult,
+    HealthStatusResult,
+    MCTPShortcutCommand,
+    create_shortcuts,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -72,4 +89,10 @@ __all__ = [
     "CriticalWarningFlags",
     # Transport
     "MCTPTransport",
+    # Shortcuts
+    "MCTPShortcuts",
+    "SerialNumberResult",
+    "HealthStatusResult",
+    "MCTPShortcutCommand",
+    "create_shortcuts",
 ]

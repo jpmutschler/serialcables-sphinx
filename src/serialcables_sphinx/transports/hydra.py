@@ -259,6 +259,42 @@ class HYDRATransport:
     def smbus_reset(self) -> bool:
         """Reset SMBus interface."""
         return self._jbof.smbus_reset()
+    
+    # =========================================================================
+    # MCTP Firmware Shortcuts (requires HYDRA firmware v0.0.6+)
+    # =========================================================================
+    
+    def get_serial_number(self, slot: Optional[int] = None, timeout: Optional[float] = None):
+        """
+        Get NVMe drive serial number via firmware shortcut.
+        
+        Uses 'mctp <slot> sn' command (requires firmware v0.0.6+).
+        
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+            
+        Returns:
+            NVMeSerialNumber from serialcables-hydra
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_get_serial_number(slot=target, timeout=timeout or self._timeout)
+    
+    def get_health_status(self, slot: Optional[int] = None, timeout: Optional[float] = None):
+        """
+        Get NVMe drive health status via firmware shortcut.
+        
+        Uses 'mctp <slot> health' command (requires firmware v0.0.6+).
+        
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+            
+        Returns:
+            NVMeHealthStatus from serialcables-hydra
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_get_health_status(slot=target, timeout=timeout or self._timeout)
 
 
 # Convenience factory function

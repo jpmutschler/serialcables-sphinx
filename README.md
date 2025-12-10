@@ -80,6 +80,49 @@ print(result.pretty_print())
 
 ## Features
 
+### Firmware Shortcuts (HYDRA v0.0.6+)
+
+For quick access to common data, use the firmware shortcuts that handle MCTP protocol internally:
+
+```python
+from serialcables_sphinx import MCTPShortcuts, create_shortcuts
+
+# Quick setup
+shortcuts = create_shortcuts("COM13")  # or "/dev/ttyUSB0"
+
+# Get serial number
+sn = shortcuts.get_serial_number(slot=1)
+print(f"Serial: {sn.serial_number}")
+
+# Get health status with quick-access values
+health = shortcuts.get_health_status(slot=1)
+print(f"Temperature: {health.temperature_celsius}°C")
+print(f"Available Spare: {health.available_spare}%")
+print(f"Is Healthy: {health.is_healthy}")
+
+# Full Sphinx decoding also available
+if health.decoded:
+    print(health.decoded.pretty_print())
+
+# Scan all slots
+for result in shortcuts.scan_all_slots():
+    if result.success:
+        print(f"Slot {result.slot}: {result.serial_number}")
+
+# Health summary
+shortcuts.print_health_summary()
+```
+
+CLI tool for shortcuts:
+
+```bash
+sphinx-shortcuts --port COM13 serial 1           # Get serial number
+sphinx-shortcuts --port COM13 health 1           # Get health status
+sphinx-shortcuts --port COM13 health 1 --full    # Full decoded output
+sphinx-shortcuts --port COM13 scan               # Scan all slots
+sphinx-shortcuts --port COM13 health-all --json  # JSON output
+```
+
 ### High-Level API
 
 Simple methods for common NVMe-MI operations:
