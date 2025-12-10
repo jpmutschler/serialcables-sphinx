@@ -52,7 +52,10 @@ def demonstrate_health_status(shortcuts: MCTPShortcuts, slot: int):
     if result.success:
         # Quick-access values (from firmware parsing)
         print("\n--- Quick Access Values (Firmware Parsed) ---")
-        print(f"Temperature: {result.temperature_celsius}°C ({result.temperature_kelvin} K)")
+        if result.temperature_celsius is not None:
+            print(f"Temperature: {result.temperature_celsius}C")
+        else:
+            print("Temperature: Not reported")
         print(f"Available Spare: {result.available_spare}%")
         print(f"Spare Threshold: {result.spare_threshold}%")
         print(f"Percentage Used: {result.percentage_used}%")
@@ -89,11 +92,11 @@ def demonstrate_scan(shortcuts: MCTPShortcuts):
     found = 0
     for result in results:
         if result.success:
-            print(f"  {result.slot}  | ✓ Present        | {result.serial_number}")
+            print(f"  {result.slot}  | [OK] Present     | {result.serial_number}")
             found += 1
         else:
             error = result.error[:20] if result.error else "No response"
-            print(f"  {result.slot}  | ✗ {error}")
+            print(f"  {result.slot}  | [--] {error}")
     
     print("-" * 50)
     print(f"Found {found}/8 drives")
