@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "serialcables-sphinx"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCTP and NVMe-MI protocol library for Serial Cables hardware"
 readme = "README.md"
 license = {text = "MIT"}
@@ -22,7 +22,10 @@ keywords = [
     "management",
     "smbus",
     "i2c",
-    "i3c"
+    "i3c",
+    "compliance",
+    "testing",
+    "unh-iol"
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -38,9 +41,10 @@ classifiers = [
     "Topic :: System :: Hardware",
     "Topic :: System :: Hardware :: Hardware Drivers",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "serialcables-hydra>=1.2.0",
+    "serialcables-hydra>=1.2.1",
 ]
 
 [project.optional-dependencies]
@@ -65,9 +69,13 @@ Issues = "https://github.com/serialcables/serialcables-sphinx/issues"
 [project.scripts]
 sphinx-decode = "serialcables_sphinx.cli:main"
 sphinx-shortcuts = "serialcables_sphinx.shortcuts_cli:main"
+sphinx-profile = "serialcables_sphinx.profiler_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+serialcables_sphinx = ["py.typed"]
 
 [tool.black]
 line-length = 100
@@ -86,4 +94,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=serialcables_sphinx"
+addopts = "-v"

@@ -120,18 +120,18 @@ class HealthStatusResult:
         """One-line health summary."""
         if not self.success:
             return f"Slot {self.slot}: Error - {self.error}"
-
+        
         parts = []
         if self.temperature_celsius is not None:
-            parts.append(f"{self.temperature_celsius:.0f}C")
+            parts.append(f"{self.temperature_celsius:.0f}°C")
         if self.available_spare is not None:
             parts.append(f"Spare:{self.available_spare}%")
         if self.percentage_used is not None:
             parts.append(f"Used:{self.percentage_used}%")
         if self.critical_warning:
-            parts.append(f"Warning:0x{self.critical_warning:02X}")
-
-        status = "OK" if self.is_healthy else "!!"
+            parts.append(f"⚠ Warning:0x{self.critical_warning:02X}")
+        
+        status = "✓" if self.is_healthy else "⚠"
         return f"[{status}] Slot {self.slot}: " + " | ".join(parts)
     
     def __str__(self) -> str:
@@ -342,13 +342,14 @@ class MCTPShortcuts:
             nvme_mi_payload = response_bytes[nvme_mi_start:nvme_mi_end]
             
             # Decode with Sphinx
-            return self._decoder.decode_response(nvme_mi_payload, opcode)
+            return self._decoder.decode(opcode, nvme_mi_payload)
             
         except Exception as e:
             # Return partial result on decode error
             return DecodedResponse(
                 opcode=opcode,
-                status=0xFF,
+                opcode_name=NVMeMIOpcode.decode(opcode),
+                status_code=0xFF,
                 raw_data=bytes(raw_packets[0]) if raw_packets else b"",
                 decode_errors=[f"Decode failed: {e}"],
             )
@@ -433,7 +434,7 @@ class MCTPShortcuts:
                 result = self.get_health_status(slot=slot, timeout=timeout)
                 print(result.summary())
             except Exception as e:
-                print(f"[X] Slot {slot}: Error - {e}")
+                print(f"[✗] Slot {slot}: Error - {e}")
         
         print("=" * 60)
 
@@ -445,20 +446,19 @@ def create_shortcuts(
 ) -> MCTPShortcuts:
     """
     Create MCTPShortcuts with connected JBOFController.
-
+    
     Args:
         port: Serial port (e.g., "/dev/ttyUSB0", "COM13")
         timeout: Default MCTP timeout
-
+        
     Returns:
         MCTPShortcuts instance ready to use
-
+        
     Example:
         shortcuts = create_shortcuts("COM13")
         health = shortcuts.get_health_status(slot=1)
     """
     from serialcables_hydra import JBOFController
-
+    
     jbof = JBOFController(port=port)
-    jbof.connect()
     return MCTPShortcuts(jbof, timeout=timeout)

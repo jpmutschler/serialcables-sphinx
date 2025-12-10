@@ -147,11 +147,11 @@ class DecodedResponse:
     def summary(self) -> str:
         """
         One-line summary of the response.
-
+        
         Returns:
-            Short status string like "[OK] HEALTH_STATUS_POLL: SUCCESS (0x00)"
+            Short status string like "[✓] HEALTH_STATUS_POLL: SUCCESS (0x00)"
         """
-        status_icon = "OK" if self.success else "FAIL"
+        status_icon = "✓" if self.success else "✗"
         opcode_name = NVMeMIOpcode.decode(self.opcode_value)
         status_str = NVMeMIStatus.decode(self.status_code)
         return f"[{status_icon}] {opcode_name}: {status_str}"
@@ -159,16 +159,16 @@ class DecodedResponse:
     def pretty_print(self, indent: int = 0) -> str:
         """
         Human-readable formatted output.
-
+        
         Args:
             indent: Number of indentation levels
-
+            
         Returns:
             Multi-line formatted string
         """
         prefix = "  " * indent
-        sep = "=" * 60
-        thin_sep = "-" * 60
+        sep = "═" * 60
+        thin_sep = "─" * 60
         
         opcode_name = NVMeMIOpcode.decode(self.opcode_value)
         status_str = NVMeMIStatus.decode(self.status_code)
@@ -191,13 +191,13 @@ class DecodedResponse:
                 unit_str = f" {fld.unit}" if fld.unit else ""
                 lines.append(f"{prefix}  {fld.name:<{max_name_len}} : {fld.value}{unit_str}")
                 if fld.description:
-                    lines.append(f"{prefix}  {' ' * max_name_len}   -> {fld.description}")
+                    lines.append(f"{prefix}  {' ' * max_name_len}   └─ {fld.description}")
         
         if self.decode_errors:
             lines.append(f"{prefix}{thin_sep}")
             lines.append(f"{prefix}Decode Warnings:")
             for err in self.decode_errors:
-                lines.append(f"{prefix}  [!] {err}")
+                lines.append(f"{prefix}  ⚠ {err}")
         
         lines.append(f"{prefix}{sep}")
         return "\n".join(lines)
