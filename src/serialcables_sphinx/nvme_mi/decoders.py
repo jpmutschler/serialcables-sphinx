@@ -47,13 +47,9 @@ class HealthStatusPollDecoder(ResponseDecoder):
         # Detect NVMe-MI version based on response size
         is_2x_response = len(data) >= self.NVME_MI_2X_RESPONSE_SIZE
         if is_2x_response:
-            self._add_field(
-                response, "Response Format", "NVMe-MI 2.x (extended)", data[0:1]
-            )
+            self._add_field(response, "Response Format", "NVMe-MI 2.x (extended)", data[0:1])
         else:
-            self._add_field(
-                response, "Response Format", "NVMe-MI 1.x", data[0:1]
-            )
+            self._add_field(response, "Response Format", "NVMe-MI 1.x", data[0:1])
 
         # Byte 0: Composite Controller Status (CCS)
         ccs = data[0]
@@ -190,9 +186,7 @@ class ControllerHealthStatusDecoder(ResponseDecoder):
         # Detect NVMe-MI version based on response size
         is_2x_response = len(data) >= self.NVME_MI_2X_RESPONSE_SIZE
         if is_2x_response:
-            self._add_field(
-                response, "Response Format", "NVMe-MI 2.x (extended)", data[0:1]
-            )
+            self._add_field(response, "Response Format", "NVMe-MI 2.x (extended)", data[0:1])
 
         # Bytes 0-1: Controller ID
         (ctrlr_id,) = self._safe_unpack("<H", data, 0, response)
