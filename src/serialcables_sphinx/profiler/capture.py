@@ -177,6 +177,7 @@ class DeviceProfiler:
         self._log(f"Connecting to HYDRA on {self._port}...")
 
         self._jbof = JBOFController(port=self._port)
+        self._jbof.connect()
         self._transport = HYDRATransport(
             self._jbof,
             slot=self._slot,

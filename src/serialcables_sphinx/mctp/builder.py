@@ -53,6 +53,7 @@ class MCTPBuilder:
     """
 
     smbus_addr: int = DEFAULT_SMBUS_ADDRESS
+    smbus_src_addr: int = 0x21  # SMBus source address (host/BMC address)
     src_eid: int = DEFAULT_SOURCE_EID
     auto_pec: bool = True
     _msg_tag: int = field(default=0, repr=False)
@@ -112,16 +113,25 @@ class MCTPBuilder:
         )
 
         # MCTP message = header + message type + payload
-        mctp_message = header.pack() + bytes([msg_type]) + payload
+        msg_and_payload = bytes([msg_type]) + payload
 
-        # SMBus framing
-        byte_count = len(mctp_message)
+        # If IC (Integrity Check) bit is set, append CRC-32C MIC
+        if msg_type & 0x80:
+            mic = self.calculate_crc32c(msg_and_payload)
+            msg_and_payload += mic.to_bytes(4, "little")
+
+        mctp_message = header.pack() + msg_and_payload
+
+        # SMBus framing per DSP0237 (MCTP SMBus/I2C Transport Binding)
+        # Format: [Dest Addr][Cmd Code][Byte Count][Source Addr][MCTP Data...][PEC]
+        byte_count = len(mctp_message) + 1  # +1 for source addr included in count
         packet = (
             bytes(
                 [
                     smbus_addr,
                     MCTP_SMBUS_COMMAND_CODE,
                     byte_count,
+                    self.smbus_src_addr,
                 ]
             )
             + mctp_message
@@ -230,6 +240,33 @@ class MCTPBuilder:
                     crc <<= 1
                 crc &= 0xFF
         return crc
+
+    @staticmethod
+    def calculate_crc32c(data: bytes) -> int:
+        """
+        Calculate CRC-32C (Castagnoli) for NVMe-MI Message Integrity Check.
+
+        Used when IC (Integrity Check) bit is set in message type.
+
+        Args:
+            data: Message data (msg_type byte + NVMe-MI payload)
+
+        Returns:
+            32-bit CRC-32C value
+        """
+        # CRC-32C polynomial (Castagnoli), reflected form
+        poly = 0x82F63B78
+        crc = 0xFFFFFFFF
+
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 1:
+                    crc = (crc >> 1) ^ poly
+                else:
+                    crc >>= 1
+
+        return crc ^ 0xFFFFFFFF
 
     def to_cli_format(self, dest_eid: int, packet: bytes) -> str:
         """

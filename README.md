@@ -4,6 +4,8 @@ MCTP and NVMe-MI protocol library for Serial Cables HYDRA enclosures.
 
 **Sphinx** handles the protocol layer (MCTP framing, NVMe-MI encoding/decoding) while **HYDRA** handles the transport layer (serial communication with hardware). Together they provide a complete end-to-end solution for NVMe Management Interface communication.
 
+Supports **NVMe-MI 1.2** (PCIe Gen5) and **NVMe-MI 2.x** (PCIe Gen6+) specifications with automatic version detection.
+
 ## Architecture
 
 ```
@@ -258,6 +260,8 @@ sphinx-decode --opcode 0x01 --json "20 f 11 3b ..."
 
 ## Supported NVMe-MI Commands
 
+### NVMe-MI 1.2 Commands
+
 | Opcode | Command | Decode Support |
 |--------|---------|----------------|
 | 0x00 | Read NVMe-MI Data Structure | ✓ |
@@ -270,7 +274,53 @@ sphinx-decode --opcode 0x01 --json "20 f 11 3b ..."
 | 0x07 | MI Reset | ✓ |
 | 0x08 | SES Receive | Planned |
 | 0x09 | SES Send | Planned |
+| 0x0D | MI Send | ✓ |
+| 0x0E | MI Receive | ✓ |
 | 0xC0+ | Vendor Specific | Extensible |
+
+### NVMe-MI 2.x Commands (PCIe Gen6+)
+
+| Opcode | Command | Decode Support |
+|--------|---------|----------------|
+| 0x10 | Get Boot Partition Configuration | ✓ |
+| 0x11 | Set Boot Partition Configuration | ✓ |
+| 0x12 | Get Security State | ✓ |
+| 0x13 | Set Security State | ✓ |
+| 0x14 | Security Send | ✓ |
+| 0x15 | Security Receive | ✓ |
+| 0x20 | MI Get Features (2.1+) | ✓ |
+| 0x21 | MI Set Features (2.1+) | ✓ |
+
+### Version Detection
+
+Sphinx automatically detects device NVMe-MI version and uses appropriate response formats:
+
+```python
+from serialcables_sphinx.nvme_mi import DeviceCapabilities, NVMeMIVersion
+
+# Query device capabilities
+info = sphinx.nvme_mi.get_subsystem_info(eid=1)
+caps = DeviceCapabilities.from_subsystem_info(info)
+
+print(f"NVMe-MI Version: {caps.nvme_mi_version}")  # e.g., "2.0"
+print(f"Is Gen6+: {caps.is_nvme_mi_2x}")
+print(f"Supports Admin Tunneling: {caps.supports_admin_tunneling}")
+```
+
+### Admin Command Tunneling
+
+Tunnel NVMe Admin commands through NVMe-MI:
+
+```python
+from serialcables_sphinx.nvme_mi import CommandCapsule, MISendRequest
+
+# NVMe-MI 2.x style (Command Capsule)
+capsule = CommandCapsule.identify_controller()
+capsule = CommandCapsule.get_smart_log()
+
+# NVMe-MI 1.2 style (MI Send/Receive)
+mi_send = MISendRequest(opcode=AdminOpcode.IDENTIFY, dwords=dwords)
+```
 
 ## Vendor Extensions
 

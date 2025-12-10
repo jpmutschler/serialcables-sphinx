@@ -3,6 +3,8 @@ NVMe-MI response decoder implementations.
 
 Each decoder handles a specific NVMe-MI opcode and extracts
 human-readable fields from the response data.
+
+Supports NVMe-MI 1.2 and 2.x response formats.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import struct
 from serialcables_sphinx.nvme_mi.base_decoder import ResponseDecoder
 from serialcables_sphinx.nvme_mi.constants import (
     CriticalWarningFlags,
+    EnduranceGroupCriticalWarning,
     NVMeDataStructureType,
     ShutdownStatus,
 )
@@ -25,13 +28,32 @@ class HealthStatusPollDecoder(ResponseDecoder):
     """
     Decoder for NVM Subsystem Health Status Poll (Opcode 0x01).
 
-    Reference: NVMe-MI 1.2, Section 6.2
+    Supports both NVMe-MI 1.2 (20-byte response) and NVMe-MI 2.x (32-byte response).
+
+    Reference:
+        - NVMe-MI 1.2, Section 6.2
+        - NVMe-MI 2.0, Section 6.2 (extended format)
     """
+
+    # Response size thresholds
+    NVME_MI_1X_RESPONSE_SIZE = 20
+    NVME_MI_2X_RESPONSE_SIZE = 32
 
     def decode(self, data: bytes, response: DecodedResponse) -> DecodedResponse:
         if len(data) < 1:
             response.decode_errors.append(f"Health status response too short: {len(data)} bytes")
             return response
+
+        # Detect NVMe-MI version based on response size
+        is_2x_response = len(data) >= self.NVME_MI_2X_RESPONSE_SIZE
+        if is_2x_response:
+            self._add_field(
+                response, "Response Format", "NVMe-MI 2.x (extended)", data[0:1]
+            )
+        else:
+            self._add_field(
+                response, "Response Format", "NVMe-MI 1.x", data[0:1]
+            )
 
         # Byte 0: Composite Controller Status (CCS)
         ccs = data[0]
@@ -111,6 +133,34 @@ class HealthStatusPollDecoder(ResponseDecoder):
                     desc = "Below threshold!"
             self._add_field(response, "Available Spare", spare_str, data[6:7], description=desc)
 
+        # =====================================================================
+        # NVMe-MI 2.x Extended Fields (bytes 20-31)
+        # =====================================================================
+        if is_2x_response:
+            # Bytes 20-23: Endurance Group Critical Warning Summary
+            if len(data) >= 24:
+                (egcws,) = struct.unpack("<I", data[20:24])
+                eg_warnings = EnduranceGroupCriticalWarning(egcws & 0xFF)
+                self._add_field(
+                    response,
+                    "Endurance Group Critical Warning",
+                    f"0x{egcws:08X}",
+                    data[20:24],
+                    description=", ".join(eg_warnings.decode()),
+                )
+
+            # Bytes 24-27: Reserved in 2.0, may have data in 2.1+
+            # Bytes 28-31: Vendor Specific
+            if len(data) >= 32:
+                vendor_data = data[28:32]
+                if any(b != 0 for b in vendor_data):
+                    self._add_field(
+                        response,
+                        "Vendor Specific Data",
+                        vendor_data.hex(),
+                        vendor_data,
+                    )
+
         return response
 
 
@@ -119,8 +169,16 @@ class ControllerHealthStatusDecoder(ResponseDecoder):
     """
     Decoder for Controller Health Status Poll (Opcode 0x02).
 
-    Reference: NVMe-MI 1.2, Section 6.3
+    Supports both NVMe-MI 1.2 (16-byte response) and NVMe-MI 2.x (32-byte response).
+
+    Reference:
+        - NVMe-MI 1.2, Section 6.3
+        - NVMe-MI 2.0, Section 6.3 (extended format)
     """
+
+    # Response size thresholds
+    NVME_MI_1X_RESPONSE_SIZE = 16
+    NVME_MI_2X_RESPONSE_SIZE = 32
 
     def decode(self, data: bytes, response: DecodedResponse) -> DecodedResponse:
         if len(data) < 8:
@@ -128,6 +186,13 @@ class ControllerHealthStatusDecoder(ResponseDecoder):
                 f"Controller health response too short: {len(data)} bytes"
             )
             return response
+
+        # Detect NVMe-MI version based on response size
+        is_2x_response = len(data) >= self.NVME_MI_2X_RESPONSE_SIZE
+        if is_2x_response:
+            self._add_field(
+                response, "Response Format", "NVMe-MI 2.x (extended)", data[0:1]
+            )
 
         # Bytes 0-1: Controller ID
         (ctrlr_id,) = self._safe_unpack("<H", data, 0, response)
@@ -183,6 +248,46 @@ class ControllerHealthStatusDecoder(ResponseDecoder):
             if pct_used != 255 and pct_used >= 100:
                 desc = "Exceeded rated endurance"
             self._add_field(response, "Percentage Used", pct_str, data[12:13], description=desc)
+
+        # =====================================================================
+        # NVMe-MI 2.x Extended Fields (bytes 16-31)
+        # =====================================================================
+        if is_2x_response:
+            # Bytes 16-17: Controller Temperature Sensor 1
+            if len(data) >= 18:
+                (cts1,) = self._safe_unpack("<H", data, 16, response)
+                if cts1 != 0:
+                    temp_str, _ = self._decode_temperature(cts1)
+                    self._add_field(response, "Temp Sensor 1", temp_str, data[16:18])
+
+            # Bytes 18-19: Controller Temperature Sensor 2
+            if len(data) >= 20:
+                (cts2,) = self._safe_unpack("<H", data, 18, response)
+                if cts2 != 0:
+                    temp_str, _ = self._decode_temperature(cts2)
+                    self._add_field(response, "Temp Sensor 2", temp_str, data[18:20])
+
+            # Bytes 20-23: Power State
+            if len(data) >= 24:
+                power_state = data[20]
+                self._add_field(response, "Power State", power_state, data[20:21])
+
+            # Bytes 24-27: Workload Hint
+            if len(data) >= 28:
+                (workload,) = self._safe_unpack("<I", data, 24, response)
+                if workload != 0:
+                    self._add_field(response, "Workload Hint", f"0x{workload:08X}", data[24:28])
+
+            # Bytes 28-31: Vendor Specific
+            if len(data) >= 32:
+                vendor_data = data[28:32]
+                if any(b != 0 for b in vendor_data):
+                    self._add_field(
+                        response,
+                        "Vendor Specific Data",
+                        vendor_data.hex(),
+                        vendor_data,
+                    )
 
         return response
 

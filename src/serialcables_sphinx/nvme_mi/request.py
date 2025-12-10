@@ -43,9 +43,13 @@ class NVMeMIRequest:
         """
         Pack request into bytes for MCTP payload.
 
-        Format (per NVMe-MI spec):
-            Byte 0: Opcode
-            Bytes 1-3: Reserved (zeros)
+        Format (per NVMe-MI 1.2 spec, Figure 6):
+            Byte 0: NMIMT/ROR (NVMe-MI Message Type / Request or Response)
+                    Bits 7: ROR (0=Request, 1=Response)
+                    Bits 6:4: Reserved
+                    Bits 3:0: NMIMT (0=MI Command Set)
+            Byte 1: Opcode
+            Bytes 2-3: Reserved (zeros)
             Bytes 4+: Command-specific data
 
         Returns:
@@ -53,8 +57,11 @@ class NVMeMIRequest:
         """
         opcode_val = self.opcode.value if isinstance(self.opcode, NVMeMIOpcode) else self.opcode
 
-        # Base MI request header: [Opcode][Reserved x3]
-        header = bytes([opcode_val, 0x00, 0x00, 0x00])
+        # NVMe-MI Request header: [NMIMT/ROR][Opcode][Reserved x2]
+        # NMIMT/ROR = 0x08 for MI Command Set request (NMIMT=0, ROR=0, Reserved=8)
+        # Note: Some implementations use 0x00, firmware uses 0x08
+        nmimt_ror = 0x08
+        header = bytes([nmimt_ror, opcode_val, 0x00, 0x00])
 
         return header + self.data
 

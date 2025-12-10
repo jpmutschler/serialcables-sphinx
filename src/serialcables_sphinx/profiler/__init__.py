@@ -20,8 +20,8 @@ Usage:
     mock = MockTransport.from_profile("samsung_990_pro.json")
 """
 
-from serialcables_sphinx.profiler.capture import DeviceProfiler
-from serialcables_sphinx.profiler.loader import ProfileLoader
+from serialcables_sphinx.profiler.capture import CaptureConfig, DeviceProfiler
+from serialcables_sphinx.profiler.loader import ProfileLoader, load_profile_to_mock
 from serialcables_sphinx.profiler.profile import (
     CapturedCommand,
     DeviceProfile,
@@ -29,9 +29,11 @@ from serialcables_sphinx.profiler.profile import (
 )
 
 __all__ = [
+    "CaptureConfig",
     "DeviceProfiler",
     "DeviceProfile",
     "CapturedCommand",
     "ProfileMetadata",
     "ProfileLoader",
+    "load_profile_to_mock",
 ]

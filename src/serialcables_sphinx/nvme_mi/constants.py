@@ -1,5 +1,7 @@
 """
 NVMe-MI constants and enumerations per NVMe-MI Specification.
+
+Supports NVMe-MI 1.2 and 2.x specifications.
 """
 
 from enum import IntEnum, IntFlag
@@ -29,13 +31,17 @@ class NVMeDataStructureType(IntEnum):
     Used with the Read NVMe-MI Data Structure command (opcode 0x00).
     """
 
+    # NVMe-MI 1.2 Data Structures
     NVM_SUBSYSTEM_INFORMATION = 0x00
     PORT_INFORMATION = 0x01
     CONTROLLER_LIST = 0x02
     CONTROLLER_INFORMATION = 0x03
     OPTIONALLY_SUPPORTED_COMMANDS = 0x04
     MANAGEMENT_ENDPOINT_BUFFER_INFO = 0x05
-    # 0x06-0xFF reserved
+
+    # NVMe-MI 2.0+ Data Structures
+    NVM_SUBSYSTEM_SECURITY_STATE = 0x06  # 2.0+
+    # 0x07-0xFF reserved
 
 
 class ConfigurationIdentifier(IntEnum):
@@ -45,10 +51,66 @@ class ConfigurationIdentifier(IntEnum):
     Used with Configuration Set (0x03) and Configuration Get (0x04) commands.
     """
 
+    # NVMe-MI 1.2 Configuration Identifiers
     SMBUS_I2C_FREQUENCY = 0x01
     HEALTH_STATUS_CHANGE = 0x02
     MCTP_TRANSMISSION_UNIT = 0x03
-    # 0x04-0xFF reserved or vendor specific
+
+    # NVMe-MI 2.0+ Configuration Identifiers
+    SECURITY_CONFIGURATION = 0x04  # 2.0+
+    # 0x05-0xFF reserved or vendor specific
+
+
+class SecurityState(IntEnum):
+    """
+    Security State values for NVMe-MI 2.0+ Get/Set Security State commands.
+
+    Reference: NVMe-MI 2.0, Section 6.14
+    """
+
+    NO_SECURITY = 0x00
+    SECURITY_UNLOCKED = 0x01
+    SECURITY_LOCKED = 0x02
+    SECURITY_FROZEN = 0x03
+    # 0x04-0xFF reserved
+
+
+class BootPartitionID(IntEnum):
+    """
+    Boot Partition identifiers for NVMe-MI 2.0+ Boot Configuration commands.
+
+    Reference: NVMe-MI 2.0, Section 6.12
+    """
+
+    BOOT_PARTITION_1 = 0x00
+    BOOT_PARTITION_2 = 0x01
+    # 0x02-0xFF reserved
+
+
+class EnduranceGroupCriticalWarning(IntFlag):
+    """
+    Endurance Group Critical Warning flags for NVMe-MI 2.0+.
+
+    These are returned in the extended Health Status Poll response.
+    Reference: NVMe-MI 2.0, Section 6.2
+    """
+
+    NONE = 0
+    SPARE_BELOW_THRESHOLD = 1 << 0
+    RESERVED_1 = 1 << 1
+    RELIABILITY_DEGRADED = 1 << 2
+    READ_ONLY_MODE = 1 << 3
+    # Bits 4-7 reserved
+
+    def decode(self) -> list[str]:
+        """Return list of active warning strings."""
+        warnings = []
+        for flag in EnduranceGroupCriticalWarning:
+            if flag != EnduranceGroupCriticalWarning.NONE and self & flag:
+                if flag != EnduranceGroupCriticalWarning.RESERVED_1:
+                    name = flag.name or str(flag.value)
+                    warnings.append(name.replace("_", " ").title())
+        return warnings if warnings else ["None"]
 
 
 class CriticalWarningFlags(IntFlag):
