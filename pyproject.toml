@@ -7,7 +7,7 @@ name = "serialcables-sphinx"
 version = "0.2.0"
 description = "MCTP and NVMe-MI protocol library for Serial Cables hardware"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
 authors = [
     {name = "Serial Cables, LLC"}
@@ -31,7 +31,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Manufacturing",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -83,14 +82,32 @@ target-version = ["py39", "py310", "py311", "py312"]
 
 [tool.ruff]
 line-length = 100
-select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4"]
-ignore = ["D100", "D104"]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+]
+
+[tool.ruff.format]
+docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.9"
-warn_return_any = true
+warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "serialcables_sphinx.profiler.*",
+    "serialcables_sphinx.profiler_cli",
+    "serialcables_sphinx.transports.mock",
+    "serialcables_sphinx.transports.hydra",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

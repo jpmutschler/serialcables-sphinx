@@ -9,24 +9,24 @@ This module provides tools to:
 
 Usage:
     from serialcables_sphinx.profiler import DeviceProfiler, DeviceProfile
-    
+
     # Capture from real device
     profiler = DeviceProfiler(port="COM13", slot=1)
     profile = profiler.capture_full_profile()
     profile.save("samsung_990_pro.json")
-    
+
     # Load into MockTransport
     from serialcables_sphinx.transports.mock import MockTransport
     mock = MockTransport.from_profile("samsung_990_pro.json")
 """
 
 from serialcables_sphinx.profiler.capture import DeviceProfiler
+from serialcables_sphinx.profiler.loader import ProfileLoader
 from serialcables_sphinx.profiler.profile import (
-    DeviceProfile,
     CapturedCommand,
+    DeviceProfile,
     ProfileMetadata,
 )
-from serialcables_sphinx.profiler.loader import ProfileLoader
 
 __all__ = [
     "DeviceProfiler",

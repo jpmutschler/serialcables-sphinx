@@ -5,17 +5,17 @@ Defines the interface that HYDRA and other transports implement.
 """
 
 from serialcables_sphinx.transports.base import (
-    MCTPTransport,
-    TransportError,
-    TimeoutError,
     CommunicationError,
+    MCTPTransport,
     PECError,
+    TimeoutError,
+    TransportError,
 )
 from serialcables_sphinx.transports.mock import (
-    MockTransport,
     MockDeviceState,
     MockHYDRA,
     MockHYDRADevice,
+    MockTransport,
 )
 
 # HYDRA adapter - only import if serialcables-hydra is available
@@ -24,11 +24,12 @@ try:
         HYDRATransport,
         create_hydra_transport,
     )
+
     _HAVE_HYDRA = True
 except ImportError:
     _HAVE_HYDRA = False
-    HYDRATransport = None
-    create_hydra_transport = None
+    HYDRATransport = None  # type: ignore[misc,assignment]
+    create_hydra_transport = None  # type: ignore[assignment]
 
 __all__ = [
     # Protocol

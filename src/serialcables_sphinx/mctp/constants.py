@@ -16,10 +16,11 @@ DEFAULT_SMBUS_ADDRESS = 0x3A  # Common NVMe-MI address
 class MCTPMessageType(IntEnum):
     """
     MCTP Message Types per DSP0236 Section 8.1.
-    
+
     The message type field identifies the higher-layer protocol
     carried in the MCTP message payload.
     """
+
     MCTP_CONTROL = 0x00
     PLDM = 0x01
     NCSI = 0x02
@@ -40,6 +41,7 @@ class MCTPControlCommand(IntEnum):
     """
     MCTP Control Message command codes per DSP0236 Section 12.
     """
+
     SET_ENDPOINT_ID = 0x01
     GET_ENDPOINT_ID = 0x02
     GET_ENDPOINT_UUID = 0x03

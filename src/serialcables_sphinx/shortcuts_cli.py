@@ -12,11 +12,12 @@ Usage:
 """
 
 import argparse
-import sys
 import json
+import sys
 
 try:
     from serialcables_hydra import JBOFController
+
     HAVE_HYDRA = True
 except ImportError:
     HAVE_HYDRA = False
@@ -27,7 +28,7 @@ from serialcables_sphinx.shortcuts import MCTPShortcuts
 def cmd_serial(shortcuts: MCTPShortcuts, args) -> int:
     """Get serial number from a slot."""
     result = shortcuts.get_serial_number(slot=args.slot, timeout=args.timeout)
-    
+
     if args.json:
         data = {
             "slot": result.slot,
@@ -41,14 +42,14 @@ def cmd_serial(shortcuts: MCTPShortcuts, args) -> int:
             print(f"Slot {result.slot}: {result.serial_number}")
         else:
             print(f"Slot {result.slot}: Error - {result.error}", file=sys.stderr)
-    
+
     return 0 if result.success else 1
 
 
 def cmd_health(shortcuts: MCTPShortcuts, args) -> int:
     """Get health status from a slot."""
     result = shortcuts.get_health_status(slot=args.slot, timeout=args.timeout)
-    
+
     if args.json:
         data = {
             "slot": result.slot,
@@ -67,14 +68,14 @@ def cmd_health(shortcuts: MCTPShortcuts, args) -> int:
         print(result.decoded.pretty_print())
     else:
         print(result.summary())
-    
+
     return 0 if result.success else 1
 
 
 def cmd_scan(shortcuts: MCTPShortcuts, args) -> int:
     """Scan all slots for drives."""
     results = shortcuts.scan_all_slots(timeout=args.timeout)
-    
+
     if args.json:
         data = [
             {
@@ -97,17 +98,17 @@ def cmd_scan(shortcuts: MCTPShortcuts, args) -> int:
                 status = result.error or "No drive"
                 print(f"Slot {result.slot}: [{status}]")
         print("=" * 50)
-        
+
         found = sum(1 for r in results if r.success)
         print(f"Found {found}/8 drives")
-    
+
     return 0
 
 
 def cmd_health_all(shortcuts: MCTPShortcuts, args) -> int:
     """Health check all slots."""
     results = shortcuts.health_check_all_slots(timeout=args.timeout)
-    
+
     if args.json:
         data = [
             {
@@ -130,11 +131,11 @@ def cmd_health_all(shortcuts: MCTPShortcuts, args) -> int:
         for result in results:
             print(result.summary())
         print("=" * 60)
-        
+
         healthy = sum(1 for r in results if r.success and r.is_healthy)
         responding = sum(1 for r in results if r.success)
         print(f"Healthy: {healthy}/{responding} responding drives")
-    
+
     return 0
 
 
@@ -152,14 +153,16 @@ Examples:
     sphinx-shortcuts --port COM13 health-all --json  # JSON output
         """,
     )
-    
+
     parser.add_argument(
-        "-p", "--port",
+        "-p",
+        "--port",
         required=True,
         help="Serial port for HYDRA (e.g., COM13, /dev/ttyUSB0)",
     )
     parser.add_argument(
-        "-t", "--timeout",
+        "-t",
+        "--timeout",
         type=float,
         default=3.0,
         help="Command timeout in seconds (default: 3.0)",
@@ -174,33 +177,33 @@ Examples:
         action="store_true",
         help="Show full decoded response (for health command)",
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    
+
     # serial command
     serial_parser = subparsers.add_parser("serial", help="Get drive serial number")
     serial_parser.add_argument("slot", type=int, help="Slot number (1-8)")
-    
+
     # health command
     health_parser = subparsers.add_parser("health", help="Get drive health status")
     health_parser.add_argument("slot", type=int, help="Slot number (1-8)")
-    
+
     # scan command
     subparsers.add_parser("scan", help="Scan all slots for drives")
-    
+
     # health-all command
     subparsers.add_parser("health-all", help="Health check all slots")
-    
+
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
         return 1
-    
+
     if not HAVE_HYDRA:
         print("Error: serialcables-hydra not installed", file=sys.stderr)
         return 1
-    
+
     # Connect to HYDRA
     try:
         jbof = JBOFController(port=args.port)
@@ -208,7 +211,7 @@ Examples:
     except Exception as e:
         print(f"Error connecting to HYDRA: {e}", file=sys.stderr)
         return 1
-    
+
     # Run command
     commands = {
         "serial": cmd_serial,
@@ -216,7 +219,7 @@ Examples:
         "scan": cmd_scan,
         "health-all": cmd_health_all,
     }
-    
+
     return commands[args.command](shortcuts, args)
 
 
