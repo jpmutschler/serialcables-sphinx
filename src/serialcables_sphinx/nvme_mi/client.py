@@ -48,7 +48,7 @@ class NVMeMIClient:
         mctp_builder: MCTPBuilder,
         mctp_parser: MCTPParser,
         decoder: NVMeMIDecoder,
-        default_eid: int = 1,
+        default_eid: int = 0,
     ):
         """
         Initialize NVMe-MI client.
@@ -120,7 +120,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse with health status fields
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.health_status_poll()
         return self._send_mi_command(eid, request)
 
@@ -139,7 +139,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse with controller-specific health
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.controller_health_status(controller_id)
         return self._send_mi_command(eid, request)
 
@@ -166,7 +166,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse with structure data
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.read_data_structure(
             data_type=data_type,
             port_id=port_id,
@@ -252,7 +252,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse with configuration data
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.configuration_get(config_id, port_id)
         return self._send_mi_command(eid, request)
 
@@ -275,7 +275,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse (check success property)
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.configuration_set(config_id, config_data, port_id)
         return self._send_mi_command(eid, request)
 
@@ -300,7 +300,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse with VPD content
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.vpd_read(offset, length)
         return self._send_mi_command(eid, request)
 
@@ -318,7 +318,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse (check success property)
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.mi_reset()
         return self._send_mi_command(eid, request)
 
@@ -339,7 +339,7 @@ class NVMeMIClient:
         Returns:
             DecodedResponse
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         request = NVMeMIRequest.vendor_specific(opcode, data)
         return self._send_mi_command(eid, request)
 
@@ -359,7 +359,7 @@ class NVMeMIClient:
         Returns:
             Dictionary with complete subsystem information
         """
-        eid = eid or self._default_eid
+        eid = eid if eid is not None else self._default_eid
         subsystem_info: dict | None = None
         health_info: dict | None = None
         controllers: list[dict] = []

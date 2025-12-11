@@ -39,31 +39,50 @@ class NVMeMIRequest:
     opcode: int | NVMeMIOpcode
     data: bytes = b""
 
-    def pack(self) -> bytes:
+    def pack(self, min_length: int = 14) -> bytes:
         """
         Pack request into bytes for MCTP payload.
 
-        Format (per NVMe-MI 1.2 spec, Figure 6):
+        Format (per HYDRA firmware packet capture):
             Byte 0: NMIMT/ROR (NVMe-MI Message Type / Request or Response)
                     Bits 7: ROR (0=Request, 1=Response)
                     Bits 6:4: Reserved
-                    Bits 3:0: NMIMT (0=MI Command Set)
-            Byte 1: Opcode
-            Bytes 2-3: Reserved (zeros)
-            Bytes 4+: Command-specific data
+                    Bits 3:0: NMIMT (8 for MI Command Set per HYDRA)
+            Bytes 1-2: Reserved (zeros)
+            Byte 3: Opcode
+            Bytes 4+: Command-specific request data
+            Byte 13: Flags (0x80 observed in firmware packets)
+
+        The firmware uses a 14-byte minimum payload with specific structure.
+
+        Args:
+            min_length: Minimum payload length (default 14 to match firmware)
 
         Returns:
-            Request payload bytes
+            Request payload bytes (padded to min_length)
         """
         opcode_val = self.opcode.value if isinstance(self.opcode, NVMeMIOpcode) else self.opcode
 
-        # NVMe-MI Request header: [NMIMT/ROR][Opcode][Reserved x2]
-        # NMIMT/ROR = 0x08 for MI Command Set request (NMIMT=0, ROR=0, Reserved=8)
-        # Note: Some implementations use 0x00, firmware uses 0x08
+        # NVMe-MI Request per HYDRA firmware format:
+        # [NMIMT/ROR][Reserved][Reserved][Opcode][Data...][Flags]
+        # HYDRA uses NMIMT=0x08 for MI commands
         nmimt_ror = 0x08
-        header = bytes([nmimt_ror, opcode_val, 0x00, 0x00])
 
-        return header + self.data
+        # Build header: NMIMT + 2 reserved + Opcode
+        header = bytes([nmimt_ror, 0x00, 0x00, opcode_val])
+
+        # Add command-specific data
+        payload = header + self.data
+
+        # Pad to minimum length (firmware uses 14 bytes)
+        # The last byte (byte 13) is 0x80 in firmware captures
+        if len(payload) < min_length:
+            # Pad with zeros, but set last byte to 0x80 like firmware
+            padding_needed = min_length - len(payload)
+            if padding_needed > 0:
+                payload = payload + bytes(padding_needed - 1) + bytes([0x80])
+
+        return payload
 
     @classmethod
     def health_status_poll(cls) -> NVMeMIRequest:

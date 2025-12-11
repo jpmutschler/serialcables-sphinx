@@ -329,13 +329,13 @@ class MockTransport(FragmentedTransportMixin):
     def _generate_response(self, packet: bytes) -> bytes:
         """Generate simulated response for request packet."""
         # Parse MCTP-over-SMBus framing
-        # Format: [SMBus dest][Cmd code][Byte count][SMBus src][MCTP header...][Msg type][Payload][PEC]
+        # Format: [SMBus dest][Cmd code][Byte count][SMBus src][MCTP header...][Msg type][Payload][MIC?][PEC]
         if len(packet) < 13:
             return self._build_error_response(0x00, NVMeMIStatus.MESSAGE_FORMAT_ERROR)
 
         # smbus_dest = packet[0]  # 0x3A for NVMe-MI
         # smbus_cmd = packet[1]   # Should be 0x0F
-        # byte_count = packet[2]
+        byte_count = packet[2]
         # smbus_src = packet[3]   # 0x21 for host
 
         # MCTP header at offset 4-7
@@ -344,23 +344,33 @@ class MockTransport(FragmentedTransportMixin):
         src_eid = packet[6]
         flags_tag = packet[7]
 
-        # Message type at offset 8
-        msg_type = packet[8] & 0x7F
+        # Message type at offset 8 (IC bit is bit 7)
+        msg_type_byte = packet[8]
+        msg_type = msg_type_byte & 0x7F
+        has_ic = bool(msg_type_byte & 0x80)  # Integrity Check bit
 
         # For NVMe-MI (type 0x04), extract opcode
         if msg_type != 0x04:
             # Not NVMe-MI, return generic error
             return self._build_error_response(0x00, NVMeMIStatus.INVALID_OPCODE)
 
+        # Calculate payload end (exclude MIC if present, exclude PEC)
+        # byte_count includes SMBus src byte and PEC, so actual MCTP data ends at 3 + byte_count - 1 (before PEC)
+        payload_end = 3 + byte_count - 1  # Before PEC (since byte_count includes PEC per DSP0237)
+        if has_ic:
+            payload_end -= 4  # Exclude 4-byte MIC
+
         # NVMe-MI payload starts at offset 9
-        # Format: [NMIMT/ROR][Opcode][Reserved x2][Data...]
-        # NMIMT/ROR byte: bits 7=ROR (0=request), bits 3:0=NMIMT (1=MI Command, 4=Admin)
+        # Format per HYDRA firmware: [NMIMT/ROR][Reserved][Reserved][Opcode][Data...][Flags]
+        # NMIMT/ROR byte: bits 7=ROR (0=request), bits 3:0=NMIMT (8 for MI Command per HYDRA)
         if len(packet) < 13:
             return self._build_error_response(0x00, NVMeMIStatus.INVALID_COMMAND_SIZE)
 
-        # nmimt_ror = packet[9]   # 0x01 for MI Command, 0x04 for Admin
-        opcode = packet[10]
-        request_data = packet[13:] if len(packet) > 13 else b""
+        # nmimt_ror = packet[9]   # 0x08 for MI Command per HYDRA
+        # reserved = packet[10:12]  # Two reserved bytes
+        opcode = packet[12]  # Opcode at byte 3 of NVMe-MI payload (offset 9+3=12)
+        # Request data starts at offset 13 (after NMIMT/ROR, reserved x2, opcode)
+        request_data = packet[13:payload_end] if payload_end > 13 else b""
 
         # Check for custom handler
         if opcode in self.custom_handlers:
@@ -369,13 +379,14 @@ class MockTransport(FragmentedTransportMixin):
             # Use built-in handlers
             response_payload = self._handle_opcode(opcode, request_data)
 
-        # Build complete MCTP response
+        # Build complete MCTP response (mirror IC bit from request)
         return self._build_mctp_response(
             response_payload,
             src_eid=dest_eid,  # Swap for response
             dest_eid=src_eid,
             msg_tag=flags_tag & 0x07,
             smbus_addr=0x20,  # Response address (host)
+            integrity_check=has_ic,  # Mirror IC bit from request
         )
 
     def _handle_opcode(self, opcode: int, data: bytes) -> bytes:
@@ -575,6 +586,7 @@ class MockTransport(FragmentedTransportMixin):
         dest_eid: int = 0,
         msg_tag: int = 0,
         smbus_addr: int = 0x20,
+        integrity_check: bool = False,
     ) -> bytes:
         """
         Build complete MCTP-over-SMBus response.
@@ -589,13 +601,15 @@ class MockTransport(FragmentedTransportMixin):
             dest_eid: Destination EID (host)
             msg_tag: Message tag from request
             smbus_addr: Response SMBus address
+            integrity_check: Include IC bit and MIC in response
 
         Returns:
             Complete MCTP packet bytes (first fragment if fragmented)
         """
         # Check if payload fits in single packet
-        # Payload + msg_type byte + MCTP header (4) must fit in byte_count (max 255)
-        max_single_payload = FragmentationConstants.MAX_RX_PAYLOAD - 1  # -1 for msg_type
+        # Payload + msg_type byte + MCTP header (4) + optional MIC (4) must fit
+        mic_size = 4 if integrity_check else 0
+        max_single_payload = FragmentationConstants.MAX_RX_PAYLOAD - 1 - mic_size
 
         if len(payload) > max_single_payload:
             # Need fragmented response
@@ -605,6 +619,7 @@ class MockTransport(FragmentedTransportMixin):
                 dest_eid=dest_eid,
                 msg_tag=msg_tag,
                 smbus_addr=smbus_addr,
+                integrity_check=integrity_check,
             )
 
             if self.verbose:
@@ -622,20 +637,31 @@ class MockTransport(FragmentedTransportMixin):
 
         mctp_header = bytes([header_byte0, dest_eid, src_eid, flags_tag])
 
-        # Message type (NVMe-MI = 0x04)
-        msg_type = 0x04
+        # Message type (NVMe-MI = 0x04, with IC bit if integrity check)
+        msg_type = 0x84 if integrity_check else 0x04
+
+        # Build message payload (msg_type + payload)
+        msg_and_payload = bytes([msg_type]) + payload
+
+        # Add MIC if integrity check enabled
+        if integrity_check:
+            mic = MCTPBuilder.calculate_crc32c(msg_and_payload)
+            msg_and_payload += mic.to_bytes(4, "little")
 
         # Full MCTP message
-        mctp_message = mctp_header + bytes([msg_type]) + payload
+        mctp_message = mctp_header + msg_and_payload
 
-        # SMBus framing
-        byte_count = len(mctp_message)
+        # SMBus framing (per DSP0237: byte_count includes through PEC)
+        # Format: [Dest Addr][Cmd Code][Byte Count][Source Addr][MCTP Data...][PEC]
+        smbus_src_addr = 0x3B  # Device SMBus source address (mirroring HYDRA)
+        byte_count = len(mctp_message) + 1 + 1  # +1 for SMBus src, +1 for PEC
         packet = (
             bytes(
                 [
                     smbus_addr,
                     MCTP_SMBUS_COMMAND_CODE,
                     byte_count,
+                    smbus_src_addr,
                 ]
             )
             + mctp_message
@@ -655,6 +681,7 @@ class MockTransport(FragmentedTransportMixin):
         msg_tag: int = 0,
         smbus_addr: int = 0x20,
         max_payload: int = FragmentationConstants.MAX_RX_PAYLOAD,
+        integrity_check: bool = False,
     ) -> list[bytes]:
         """
         Build fragmented MCTP response for large payloads.
@@ -672,13 +699,22 @@ class MockTransport(FragmentedTransportMixin):
         Returns:
             List of MCTP packet fragments
         """
-        # Message type byte is part of the payload on wire
-        msg_type = 0x04  # NVMe-MI
+        # Message type byte is part of the payload on wire (with IC bit if enabled)
+        msg_type = 0x84 if integrity_check else 0x04  # NVMe-MI
         wire_payload = bytes([msg_type]) + payload
+
+        # Add MIC if integrity check enabled (only on the full message)
+        if integrity_check:
+            mic = MCTPBuilder.calculate_crc32c(wire_payload)
+            wire_payload += mic.to_bytes(4, "little")
 
         if len(wire_payload) <= max_payload:
             # Fits in single packet
-            return [self._build_mctp_response(payload, src_eid, dest_eid, msg_tag, smbus_addr)]
+            return [
+                self._build_mctp_response(
+                    payload, src_eid, dest_eid, msg_tag, smbus_addr, integrity_check
+                )
+            ]
 
         fragments = []
         self._response_pkt_seq.reset()
@@ -705,14 +741,17 @@ class MockTransport(FragmentedTransportMixin):
             # For subsequent fragments, chunk is continuation data
             mctp_message = mctp_header + chunk
 
-            # SMBus framing
-            byte_count = len(mctp_message)
+            # SMBus framing (per DSP0237: byte_count includes through PEC)
+            # Format: [Dest Addr][Cmd Code][Byte Count][Source Addr][MCTP Data...][PEC]
+            smbus_src_addr = 0x3B  # Device SMBus source address
+            byte_count = len(mctp_message) + 1 + 1  # +1 for SMBus src, +1 for PEC
             packet = (
                 bytes(
                     [
                         smbus_addr,
                         MCTP_SMBUS_COMMAND_CODE,
                         byte_count,
+                        smbus_src_addr,
                     ]
                 )
                 + mctp_message
@@ -804,10 +843,11 @@ class MockTransport(FragmentedTransportMixin):
         if not self.sent_packets:
             return None
         packet = self.sent_packets[-1]
-        # Opcode is at offset 10:
-        # [0-2]=SMBus header, [3]=SMBus src, [4-7]=MCTP header, [8]=MsgType, [9]=NMIMT/ROR, [10]=Opcode
-        if len(packet) >= 11:
-            return packet[10]
+        # Opcode is at offset 12 per HYDRA firmware format:
+        # [0-2]=SMBus header, [3]=SMBus src, [4-7]=MCTP header, [8]=MsgType,
+        # [9]=NMIMT/ROR, [10-11]=Reserved, [12]=Opcode
+        if len(packet) >= 13:
+            return packet[12]
         return None
 
     def inject_error(self, message: str = "Simulated transport error") -> None:

@@ -87,32 +87,41 @@ print(result.pretty_print())
 For quick access to common data, use the firmware shortcuts that handle MCTP protocol internally:
 
 ```python
-from serialcables_sphinx import MCTPShortcuts, create_shortcuts
+from serialcables_sphinx.transports.hydra import HYDRATransport
+from serialcables_hydra import JBOFController
 
-# Quick setup
-shortcuts = create_shortcuts("COM13")  # or "/dev/ttyUSB0"
+# Connect to HYDRA
+jbof = JBOFController("COM13")  # or "/dev/ttyUSB0"
+jbof.connect()
+
+# Create transport for a slot
+transport = HYDRATransport(jbof, slot=2)
+
+# Get health status via firmware shortcut
+health = transport.get_health_status()
+print(f"Temperature: {health.composite_temperature - 273}°C")
+print(f"Available Spare: {health.available_spare}%")
 
 # Get serial number
-sn = shortcuts.get_serial_number(slot=1)
+sn = transport.get_serial_number()
 print(f"Serial: {sn.serial_number}")
+```
 
-# Get health status with quick-access values
-health = shortcuts.get_health_status(slot=1)
-print(f"Temperature: {health.temperature_celsius}°C")
-print(f"Available Spare: {health.available_spare}%")
-print(f"Is Healthy: {health.is_healthy}")
+### MCTP Session Control (HYDRA v1.3+)
 
-# Full Sphinx decoding also available
-if health.decoded:
-    print(health.decoded.pretty_print())
+Control MCTP communication sessions:
 
-# Scan all slots
-for result in shortcuts.scan_all_slots():
-    if result.success:
-        print(f"Slot {result.slot}: {result.serial_number}")
+```python
+# Pause/Resume MCTP transactions
+transport.mctp_pause()   # Pause ongoing transactions
+transport.mctp_resume()  # Resume paused transactions
 
-# Health summary
-shortcuts.print_health_summary()
+# Abort and get status
+transport.mctp_abort()   # Abort current transaction
+status = transport.mctp_status()  # Get MCTP state
+
+# Replay last transaction (useful for debugging)
+result = transport.mctp_replay()  # Re-send last packet
 ```
 
 CLI tool for shortcuts:
@@ -395,7 +404,7 @@ print(result.pretty_print())
 ## Requirements
 
 - Python 3.9+
-- serialcables-hydra >= 0.1.0
+- serialcables-hydra >= 1.3.0
 
 ## License
 

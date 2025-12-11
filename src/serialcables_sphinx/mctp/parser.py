@@ -121,37 +121,44 @@ class MCTPParser:
         if len(data) < 8:
             raise ValueError(f"Packet too short: {len(data)} bytes, minimum 8")
 
-        # SMBus framing
+        # SMBus framing: [Dest Addr][Cmd Code][Byte Count][Src Addr][MCTP...]
         smbus_addr = data[0]
         smbus_cmd = data[1]
         byte_count = data[2]
+        # smbus_src_addr = data[3]  # SMBus source address
 
         # Validate SMBus command code
         if smbus_cmd != MCTP_SMBUS_COMMAND_CODE:
             # Some responses may have different format, be lenient
             pass
 
-        # MCTP header (4 bytes starting at offset 3)
-        header = MCTPHeader.unpack(data[3:7])
+        # MCTP header (4 bytes starting at offset 4, after SMBus src addr)
+        header = MCTPHeader.unpack(data[4:8])
 
-        # Message type byte
-        msg_type_byte = data[7]
+        # Message type byte at offset 8
+        msg_type_byte = data[8]
         integrity_check = bool(msg_type_byte & 0x80)
         msg_type = msg_type_byte & 0x7F
 
         # Calculate where payload ends
-        # byte_count covers: MCTP header (4) + msg_type (1) + payload
-        byte_count - 5  # 4 header + 1 msg_type
+        # byte_count includes: SMBus src (1) + MCTP header (4) + msg_type (1) + payload [+ MIC (4)] [+ PEC (1)]
+        # Per DSP0237, byte_count includes through PEC, so MCTP data ends at 3 + byte_count - 1
+        expected_end = 3 + byte_count - 1  # -1 to exclude PEC which is included in byte_count
 
-        # Payload starts at offset 8
-        payload_start = 8
+        # Payload starts at offset 9 (after msg_type)
+        payload_start = 9
+
+        # If IC bit set, exclude MIC (4 bytes) from payload
+        if integrity_check:
+            payload_end = expected_end - 4  # Exclude MIC
+        else:
+            payload_end = expected_end
 
         # Check if there's a PEC byte
-        expected_end = 3 + byte_count  # After SMBus framing
         has_pec = len(data) > expected_end
 
         if has_pec:
-            payload = data[payload_start:expected_end]
+            payload = data[payload_start:payload_end]
             pec = data[expected_end]
 
             # Validate PEC if requested
@@ -160,7 +167,7 @@ class MCTPParser:
                 calculated = MCTPBuilder.calculate_pec(data[:expected_end])
                 pec_valid = calculated == pec
         else:
-            payload = data[payload_start:]
+            payload = data[payload_start:payload_end] if integrity_check else data[payload_start:]
             pec = None
             pec_valid = None
 

@@ -298,6 +298,95 @@ class HYDRATransport:
         target = slot or self._slot
         return self._jbof.mctp_get_health_status(slot=target, timeout=timeout or self._timeout)
 
+    # =========================================================================
+    # MCTP Session Control (requires HYDRA firmware v1.3+)
+    # =========================================================================
+
+    def mctp_pause(self, slot: int | None = None, timeout: float | None = None):
+        """
+        Pause MCTP communication on a slot.
+
+        Uses 'mctp <slot> pause' command. Pauses ongoing MCTP transactions,
+        useful for debugging or when device needs time to process.
+
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+
+        Returns:
+            MCTPResponse from serialcables-hydra
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_pause(slot=target, timeout=timeout or self._timeout)
+
+    def mctp_resume(self, slot: int | None = None, timeout: float | None = None):
+        """
+        Resume MCTP communication on a slot.
+
+        Uses 'mctp <slot> resume' command. Resumes paused MCTP transactions.
+
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+
+        Returns:
+            MCTPResponse from serialcables-hydra
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_resume(slot=target, timeout=timeout or self._timeout)
+
+    def mctp_abort(self, slot: int | None = None, timeout: float | None = None):
+        """
+        Abort MCTP communication on a slot.
+
+        Uses 'mctp <slot> abort' command. Aborts any ongoing MCTP transaction
+        and resets the MCTP state machine for the slot.
+
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+
+        Returns:
+            MCTPResponse from serialcables-hydra
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_abort(slot=target, timeout=timeout or self._timeout)
+
+    def mctp_status(self, slot: int | None = None, timeout: float | None = None):
+        """
+        Get MCTP status for a slot.
+
+        Uses 'mctp <slot> status' command. Returns the current state of
+        MCTP communication including any pending transactions or errors.
+
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+
+        Returns:
+            MCTPResponse from serialcables-hydra with status information
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_status(slot=target, timeout=timeout or self._timeout)
+
+    def mctp_replay(self, slot: int | None = None, timeout: float | None = None):
+        """
+        Replay the last MCTP transaction on a slot.
+
+        Uses 'mctp <slot> replay' command. Re-sends the last MCTP packet
+        that was transmitted to the slot. Useful for debugging or retrying
+        failed transactions.
+
+        Args:
+            slot: Slot number (default: current slot)
+            timeout: Optional timeout override
+
+        Returns:
+            MCTPResponse from serialcables-hydra with the replayed response
+        """
+        target = slot or self._slot
+        return self._jbof.mctp_replay(slot=target, timeout=timeout or self._timeout)
+
 
 # Convenience factory function
 def create_hydra_transport(

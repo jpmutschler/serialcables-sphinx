@@ -124,7 +124,10 @@ class MCTPBuilder:
 
         # SMBus framing per DSP0237 (MCTP SMBus/I2C Transport Binding)
         # Format: [Dest Addr][Cmd Code][Byte Count][Source Addr][MCTP Data...][PEC]
-        byte_count = len(mctp_message) + 1  # +1 for source addr included in count
+        # Per DSP0237: Byte Count includes bytes from Source Addr through PEC
+        # byte_count = SMBus src (1) + MCTP data + PEC (1 if included)
+        pec_size = 1 if include_pec else 0
+        byte_count = len(mctp_message) + 1 + pec_size  # +1 for source addr, +1 for PEC
         packet = (
             bytes(
                 [
@@ -147,7 +150,7 @@ class MCTPBuilder:
         self,
         dest_eid: int,
         payload: bytes,
-        integrity_check: bool = False,
+        integrity_check: bool = True,
         **kwargs,
     ) -> bytes:
         """
@@ -514,8 +517,9 @@ class MCTPBuilder:
         # MCTP message = header + wire_payload (which includes msg_type for first)
         mctp_message = header.pack() + wire_payload
 
-        # SMBus framing
-        byte_count = len(mctp_message)
+        # SMBus framing (per DSP0237: byte_count includes through PEC)
+        pec_size = 1 if include_pec else 0
+        byte_count = len(mctp_message) + pec_size
         packet = (
             bytes(
                 [

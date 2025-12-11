@@ -53,7 +53,7 @@ class Sphinx:
         self,
         transport: MCTPTransport,
         vendor_id: int | None = None,
-        default_eid: int = 1,
+        default_eid: int = 0,
         default_smbus_addr: int = 0x3A,
         src_eid: int = 0x00,
     ):
