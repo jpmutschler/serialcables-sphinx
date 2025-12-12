@@ -39,7 +39,7 @@ class NVMeMIRequest:
     opcode: int | NVMeMIOpcode
     data: bytes = b""
 
-    def pack(self, min_length: int = 14) -> bytes:
+    def pack(self, min_length: int = 15) -> bytes:
         """
         Pack request into bytes for MCTP payload.
 

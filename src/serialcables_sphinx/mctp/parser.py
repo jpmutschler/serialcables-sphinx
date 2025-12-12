@@ -141,9 +141,10 @@ class MCTPParser:
         msg_type = msg_type_byte & 0x7F
 
         # Calculate where payload ends
-        # byte_count includes: SMBus src (1) + MCTP header (4) + msg_type (1) + payload [+ MIC (4)] [+ PEC (1)]
-        # Per DSP0237, byte_count includes through PEC, so MCTP data ends at 3 + byte_count - 1
-        expected_end = 3 + byte_count - 1  # -1 to exclude PEC which is included in byte_count
+        # byte_count includes: SMBus src (1) + MCTP header (4) + msg_type (1) + payload [+ MIC (4)]
+        # Per DSP0237, byte_count does NOT include PEC - PEC is separate
+        # Byte count's bytes start at offset 3, so end index is 3 + byte_count
+        expected_end = 3 + byte_count  # Index of first byte after byte_count's coverage
 
         # Payload starts at offset 9 (after msg_type)
         payload_start = 9
@@ -154,7 +155,7 @@ class MCTPParser:
         else:
             payload_end = expected_end
 
-        # Check if there's a PEC byte
+        # Check if there's a PEC byte (packet longer than byte_count's coverage)
         has_pec = len(data) > expected_end
 
         if has_pec:
