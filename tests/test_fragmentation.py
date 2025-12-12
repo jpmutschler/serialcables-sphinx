@@ -32,14 +32,14 @@ class TestFragmentationConstants:
         assert FragmentationConstants.MAX_RX_PACKET_SIZE == 256
 
     def test_overhead_calculation(self):
-        # 3 SMBus + 4 MCTP + 1 PEC = 8
-        assert FragmentationConstants.PACKET_OVERHEAD == 8
+        # 4 SMBus (dest_addr + cmd + byte_count + src_addr) + 4 MCTP + 1 PEC = 9
+        assert FragmentationConstants.PACKET_OVERHEAD == 9
 
     def test_max_payload_calculation(self):
-        # 128 - 8 = 120
-        assert FragmentationConstants.MAX_TX_PAYLOAD == 120
-        # 256 - 8 = 248
-        assert FragmentationConstants.MAX_RX_PAYLOAD == 248
+        # 128 - 9 = 119
+        assert FragmentationConstants.MAX_TX_PAYLOAD == 119
+        # 256 - 9 = 247
+        assert FragmentationConstants.MAX_RX_PAYLOAD == 247
 
 
 class TestPacketSequence:
@@ -89,13 +89,13 @@ class TestFragmentationDetection:
 
     def test_max_single_packet(self):
         builder = MCTPBuilder()
-        # Max payload = 120, minus 1 for msg_type = 119 bytes of data
-        payload = bytes(119)
+        # Max payload = 119, minus 1 for msg_type = 118 bytes of data
+        payload = bytes(118)
         assert not builder.needs_fragmentation(payload)
 
     def test_just_over_limit(self):
         builder = MCTPBuilder()
-        payload = bytes(120)  # +1 for msg_type = 121 > 120
+        payload = bytes(119)  # +1 for msg_type = 120 > 119
         assert builder.needs_fragmentation(payload)
 
     def test_large_payload(self):
@@ -114,13 +114,13 @@ class TestFragmentCount:
 
     def test_two_fragments(self):
         builder = MCTPBuilder()
-        # 120 bytes per fragment, need 121-240 for 2 fragments
+        # 119 bytes per fragment, need 120-238 for 2 fragments
         payload = bytes(150)
         assert builder.calculate_fragment_count(payload) == 2
 
     def test_five_fragments(self):
         builder = MCTPBuilder()
-        # 512 bytes = 5 fragments (120*4=480, plus remainder)
+        # 512 bytes = 5 fragments (119*4=476, plus remainder)
         payload = bytes(512)
         count = builder.calculate_fragment_count(payload)
         assert count == 5
@@ -205,7 +205,7 @@ class TestBuildFragmented:
 
         # All fragments should have same tag
         for frag in result.fragments:
-            flags_tag = frag.data[6]  # Offset to flags/tag byte
+            flags_tag = frag.data[7]  # Offset to flags/tag byte (after SMBus src addr)
             tag = flags_tag & 0x07
             assert tag == 5
 

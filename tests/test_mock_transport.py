@@ -260,7 +260,7 @@ class TestMCTPBuilder:
         mock = MockTransport()
         sphinx = Sphinx(mock)
 
-        # Use the high-level API which uses the new 14-byte format
+        # Use the high-level API which uses the 15-byte format
         sphinx.nvme_mi.health_status_poll(eid=0)
         packet = mock.get_last_request()
 
@@ -268,8 +268,8 @@ class TestMCTPBuilder:
         # [0]=SMBus dest, [1]=Cmd code, [2]=Byte count, [3]=SMBus src
         # [4]=MCTP ver, [5]=Dest EID, [6]=Src EID, [7]=Flags/Tag
         # [8]=Msg type (0x84 with IC bit)
-        # [9]=NMIMT/ROR, [10]=Reserved, [11]=Reserved, [12]=Opcode, [13+]=Data, [22]=Flags(0x80)
-        # [23-26]=MIC, [27]=PEC
+        # [9]=NMIMT/ROR, [10]=Reserved, [11]=Reserved, [12]=Opcode, [13+]=Data, [23]=Flags(0x80)
+        # [24-27]=MIC, [28]=PEC
         assert packet[0] == 0x3A  # Default SMBus address
         assert packet[1] == 0x0F  # MCTP command code
         assert packet[3] == 0x21  # SMBus source address
@@ -279,15 +279,15 @@ class TestMCTPBuilder:
         assert packet[10] == 0x00  # Reserved
         assert packet[11] == 0x00  # Reserved
         assert packet[12] == 0x01  # Health poll opcode (at byte 3 of NVMe-MI payload)
-        assert packet[22] == 0x80  # Flags byte at end of 14-byte payload
+        assert packet[23] == 0x80  # Flags byte at end of 15-byte payload
 
     def test_build_packet_without_ic(self):
         """Test building packet without integrity check."""
         mock = MockTransport()
         sphinx = Sphinx(mock)
 
-        # Build a 14-byte payload matching firmware format
-        payload = bytes([0x08, 0x00, 0x00, 0x01]) + bytes(9) + bytes([0x80])  # 14 bytes
+        # Build a 15-byte payload matching firmware format
+        payload = bytes([0x08, 0x00, 0x00, 0x01]) + bytes(10) + bytes([0x80])  # 15 bytes
         packet = sphinx.mctp.build_nvme_mi_request(
             dest_eid=0,
             payload=payload,
@@ -301,43 +301,42 @@ class TestMCTPBuilder:
         mock = MockTransport()
         sphinx = Sphinx(mock)
 
-        # Build a 14-byte payload matching firmware format
-        payload = bytes([0x08, 0x00, 0x00, 0x00]) + bytes(9) + bytes([0x80])  # 14 bytes
+        # Build a 15-byte payload matching firmware format
+        payload = bytes([0x08, 0x00, 0x00, 0x00]) + bytes(10) + bytes([0x80])  # 15 bytes
         packet = sphinx.mctp.build_nvme_mi_request(
             dest_eid=0,
             payload=payload,
             integrity_check=False,  # Simpler to verify without MIC
         )
 
-        # Per DSP0237: byte_count includes bytes from SMBus src through PEC
-        # byte_count = SMBus src (1) + MCTP header (4) + msg_type (1) + payload (14) + PEC (1) = 21
+        # Per DSP0237: byte_count includes bytes from SMBus src through end (excluding PEC)
+        # byte_count = SMBus src (1) + MCTP header (4) + msg_type (1) + payload (15) = 21
         byte_count = packet[2]
-        assert byte_count == 1 + 4 + 1 + 14 + 1  # 21 bytes
+        assert byte_count == 1 + 4 + 1 + 15  # 21 bytes
 
-        # Total packet = SMBus prefix (3) + SMBus src (1) + MCTP data (byte_count - 1 - 1 for src and PEC) + PEC (1)
-        # Or simply: packet length = 3 + byte_count (since byte_count includes src through PEC)
-        assert len(packet) == 3 + byte_count
+        # Total packet = SMBus prefix (3) + byte_count + PEC (1)
+        assert len(packet) == 3 + byte_count + 1
 
     def test_mic_calculation(self):
         """Test MIC (CRC-32C) is appended when IC bit is set."""
         mock = MockTransport()
         sphinx = Sphinx(mock)
 
-        # Build a 14-byte payload matching firmware format
-        payload = bytes([0x08, 0x00, 0x00, 0x01]) + bytes(9) + bytes([0x80])  # 14 bytes
+        # Build a 15-byte payload matching firmware format
+        payload = bytes([0x08, 0x00, 0x00, 0x01]) + bytes(10) + bytes([0x80])  # 15 bytes
         packet = sphinx.mctp.build_nvme_mi_request(
             dest_eid=0,
             payload=payload,
             integrity_check=True,
         )
 
-        # Per DSP0237: byte_count includes bytes from SMBus src through PEC
-        # byte_count = SMBus src (1) + MCTP header (4) + msg_type (1) + payload (14) + MIC (4) + PEC (1) = 25
+        # Per DSP0237: byte_count includes bytes from SMBus src through end (excluding PEC)
+        # byte_count = SMBus src (1) + MCTP header (4) + msg_type (1) + payload (15) + MIC (4) = 25
         byte_count = packet[2]
-        assert byte_count == 1 + 4 + 1 + 14 + 4 + 1  # 25 bytes
+        assert byte_count == 1 + 4 + 1 + 15 + 4  # 25 bytes
 
-        # Total packet = 3 + byte_count (since byte_count includes src through PEC)
-        assert len(packet) == 3 + byte_count
+        # Total packet = SMBus prefix (3) + byte_count + PEC (1)
+        assert len(packet) == 3 + byte_count + 1
 
     def test_firmware_format_packet_structure(self):
         """Test that packet structure matches HYDRA firmware format."""
@@ -348,34 +347,34 @@ class TestMCTPBuilder:
         sphinx.nvme_mi.health_status_poll(eid=0)
         packet = mock.get_last_request()
 
-        # Firmware packet format (28 bytes total):
-        # 3a 0f 19 21 01 00 00 eb 84 08 00 00 01 00 00 00 00 00 00 00 00 00 80 aa ef 81 b4 48
+        # Firmware packet format (29 bytes total):
+        # 3a 0f 19 21 01 00 00 c8 84 08 00 00 01 00 00 00 00 00 00 00 00 00 00 80 aa ef 81 b4 cb
         #
         # Breakdown:
         # [0] 3a = SMBus dest addr
         # [1] 0f = MCTP command code
-        # [2] 19 = Byte count (25 per DSP0237: includes SMBus src through PEC)
+        # [2] 19 = Byte count (25 per DSP0237: excludes PEC)
         # [3] 21 = SMBus src addr
         # [4-7] = MCTP header (01 00 00 xx)
         # [8] 84 = Message type (NVMe-MI with IC bit)
-        # [9-22] = NVMe-MI payload (14 bytes): 08 00 00 01 00 00 00 00 00 00 00 00 00 80
-        # [23-26] = MIC (4 bytes)
-        # [27] = PEC (1 byte)
+        # [9-23] = NVMe-MI payload (15 bytes): 08 00 00 01 00 00 00 00 00 00 00 00 00 00 80
+        # [24-27] = MIC (4 bytes)
+        # [28] = PEC (1 byte)
 
-        # Per DSP0237: byte_count = SMBus src (1) + MCTP header (4) + msg_type (1) + payload (14) + MIC (4) + PEC (1) = 25
+        # Per DSP0237: byte_count = SMBus src (1) + MCTP header (4) + msg_type (1) + payload (15) + MIC (4) = 25
         assert packet[2] == 25, f"Expected byte count 25, got {packet[2]}"
 
-        # Verify total packet length = 3 + byte_count = 28 bytes
-        assert len(packet) == 28, f"Expected 28 bytes, got {len(packet)}"
+        # Verify total packet length = 3 + byte_count + PEC = 29 bytes
+        assert len(packet) == 29, f"Expected 29 bytes, got {len(packet)}"
 
         # Verify NVMe-MI payload structure
-        nvme_mi_payload = packet[9:23]  # 14 bytes
-        assert len(nvme_mi_payload) == 14
+        nvme_mi_payload = packet[9:24]  # 15 bytes
+        assert len(nvme_mi_payload) == 15
         assert nvme_mi_payload[0] == 0x08  # NMIMT/ROR
         assert nvme_mi_payload[1] == 0x00  # Reserved
         assert nvme_mi_payload[2] == 0x00  # Reserved
         assert nvme_mi_payload[3] == 0x01  # Opcode (health status poll)
-        assert nvme_mi_payload[13] == 0x80  # Flags byte
+        assert nvme_mi_payload[14] == 0x80  # Flags byte at end of 15-byte payload
 
 
 class TestDiscovery:

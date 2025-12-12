@@ -44,18 +44,18 @@ class FragmentationConstants:
     MAX_RX_PACKET_SIZE = 256
 
     # Overhead breakdown
-    SMBUS_HEADER_SIZE = 3  # addr + cmd + byte_count
+    SMBUS_HEADER_SIZE = 4  # dest_addr + cmd + byte_count + src_addr
     MCTP_HEADER_SIZE = 4  # 4-byte MCTP transport header
     PEC_SIZE = 1  # CRC-8 at end
 
     # Fixed overhead per packet
-    PACKET_OVERHEAD = SMBUS_HEADER_SIZE + MCTP_HEADER_SIZE + PEC_SIZE  # 8 bytes
+    PACKET_OVERHEAD = SMBUS_HEADER_SIZE + MCTP_HEADER_SIZE + PEC_SIZE  # 9 bytes
 
     # Maximum payload per TX packet
-    MAX_TX_PAYLOAD = MAX_TX_PACKET_SIZE - PACKET_OVERHEAD  # 120 bytes
+    MAX_TX_PAYLOAD = MAX_TX_PACKET_SIZE - PACKET_OVERHEAD  # 119 bytes
 
     # Maximum payload per RX packet
-    MAX_RX_PAYLOAD = MAX_RX_PACKET_SIZE - PACKET_OVERHEAD  # 248 bytes
+    MAX_RX_PAYLOAD = MAX_RX_PACKET_SIZE - PACKET_OVERHEAD  # 247 bytes
 
     # Default inter-fragment delay (milliseconds)
     # Devices typically need fragments within 100-500ms
